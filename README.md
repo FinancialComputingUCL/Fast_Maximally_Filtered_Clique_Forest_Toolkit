@@ -34,6 +34,7 @@ from fast_fast_mfcf import MFCF
 
 X = ...  # samples x features
 C = np.corrcoef(X, rowvar=False)
+Cov = np.cov(X,rowvar=False)
 
 builder = MFCF(
     threshold=0.05,
@@ -41,7 +42,7 @@ builder = MFCF(
     max_clique_size=5,
     coordination_number=10,
 )
-cliques, separators, peo, logo = builder.run(C=C)
+cliques, separators, peo, logo = builder.run(C=C, cov_matrix=Cov)
 ```
 - `cliques`: list of maximal cliques.
 - `separators`: separator multiplicities (`collections.Counter`).
