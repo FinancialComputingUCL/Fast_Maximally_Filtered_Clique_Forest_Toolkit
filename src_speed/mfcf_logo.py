@@ -11,6 +11,34 @@ from sklearn.model_selection import KFold, cross_val_score
 from sklearn.utils.validation import check_array, check_is_fitted, _is_arraylike
 
 from fast_fast_mfcf import MFCF as _MFCFBuilder
+from mutual_information import mutual_information_matrix as _mi_matrix
+
+
+_VALID_SIMILARITIES = ("correlation", "mutual_information")
+
+
+def _build_similarity(
+    X: np.ndarray,
+    similarity: str,
+    mi_n_neighbors: int,
+    mi_normalize: str,
+    mi_n_jobs: Optional[int],
+    mi_random_state: Optional[int],
+) -> np.ndarray:
+    """Return the (p, p) similarity matrix used as MFCF's gain input."""
+    if similarity == "correlation":
+        return np.corrcoef(X, rowvar=False)
+    if similarity == "mutual_information":
+        return _mi_matrix(
+            X,
+            n_neighbors=mi_n_neighbors,
+            normalize=mi_normalize,
+            n_jobs=mi_n_jobs,
+            random_state=mi_random_state,
+        )
+    raise ValueError(
+        f"similarity must be one of {_VALID_SIMILARITIES}, got {similarity!r}."
+    )
 
 
 class MFCFLoGo(EmpiricalCovariance):
@@ -38,6 +66,30 @@ class MFCFLoGo(EmpiricalCovariance):
         Gain function type to use in MFCF construction. The function is used to
         determine which vertex to add next to maximize the overall gain in the
         graph.
+
+    similarity : {'correlation', 'mutual_information'}, default='correlation'
+        Similarity used to score MFCF gains.  ``'correlation'`` uses Pearson
+        correlation (assumes joint Gaussianity).  ``'mutual_information'``
+        builds the pairwise MI matrix with the Kraskov–Stögbauer–Grassberger
+        k-NN estimator (Kraskov et al. 2004) and, by default, transforms it
+        with Linfoot's informational correlation coefficient so entries live
+        in ``[0, 1]`` and reduce to ``|Pearson rho|`` under Gaussianity.
+
+    mi_n_neighbors : int, default=3
+        Number of neighbours for the KSG estimator.  Only used when
+        ``similarity='mutual_information'``.
+
+    mi_normalize : {'linfoot', 'none'}, default='linfoot'
+        Normalisation applied to the raw KSG MI estimates.  Only used when
+        ``similarity='mutual_information'``.
+
+    mi_n_jobs : int or None, default=None
+        Parallelism forwarded to the KSG estimator (sklearn >= 1.5).  Only
+        used when ``similarity='mutual_information'``.
+
+    mi_random_state : int or None, default=None
+        Random state for the KSG estimator's tie-breaking jitter.  Only used
+        when ``similarity='mutual_information'``.
 
     assume_centered : bool, default=False
         If True, data are not centered before computation.
@@ -74,6 +126,11 @@ class MFCFLoGo(EmpiricalCovariance):
         max_clique_size: int = 4,
         coordination_number: int = np.inf,
         gain_function_type: str = "sumsquares",
+        similarity: str = "correlation",
+        mi_n_neighbors: int = 3,
+        mi_normalize: str = "linfoot",
+        mi_n_jobs: Optional[int] = None,
+        mi_random_state: Optional[int] = None,
         assume_centered: bool = False,
     ):
         super().__init__(assume_centered=assume_centered)
@@ -82,9 +139,15 @@ class MFCFLoGo(EmpiricalCovariance):
         self.max_clique_size = max_clique_size
         self.coordination_number = coordination_number
         self.gain_function_type = gain_function_type
+        self.similarity = similarity
+        self.mi_n_neighbors = mi_n_neighbors
+        self.mi_normalize = mi_normalize
+        self.mi_n_jobs = mi_n_jobs
+        self.mi_random_state = mi_random_state
 
     def fit(self, X: np.ndarray, y=None,
             corr_matrix: Optional[np.ndarray] = None,
+            mi_matrix: Optional[np.ndarray] = None,
             cov_matrix: Optional[np.ndarray] = None) -> "MFCFLoGo":
         """Fit the estimator from data X.
 
@@ -98,14 +161,25 @@ class MFCFLoGo(EmpiricalCovariance):
 
         corr_matrix : np.ndarray, optional
             Precomputed feature correlation matrix to use in the MFCF
-            gain function. When supplied the expensive
-            ``np.corrcoef`` call is skipped. The matrix is *not*
-            re-validated; pass shape ``(p, p)`` aligned with ``X``.
+            gain function.  Honoured only when ``similarity='correlation'``.
+            When supplied the expensive ``np.corrcoef`` call is skipped.
+            The matrix is *not* re-validated; pass shape ``(p, p)`` aligned
+            with ``X``.
+
+        mi_matrix : np.ndarray, optional
+            Precomputed mutual-information similarity matrix to use in the
+            MFCF gain function.  Honoured only when
+            ``similarity='mutual_information'``.  When supplied the expensive
+            KSG computation is skipped.  Pass shape ``(p, p)`` aligned with
+            ``X``.
 
         cov_matrix : np.ndarray, optional
             Precomputed feature covariance/correlation to use in the
-            LoGo aggregation step (the per-clique inversions). If
-            ``None`` the correlation matrix is used.
+            LoGo aggregation step (the per-clique inversions).  If ``None``
+            the empirical covariance is used when ``similarity='mutual_information'``
+            (because the MI matrix is not a covariance and cannot be inverted),
+            and the correlation matrix is used when
+            ``similarity='correlation'`` (preserving the prior behaviour).
 
         Returns
         -------
@@ -126,7 +200,38 @@ class MFCFLoGo(EmpiricalCovariance):
             else X.mean(axis=0)
         )
 
-        C = corr_matrix if corr_matrix is not None else np.corrcoef(X, rowvar=False)
+        if self.similarity not in _VALID_SIMILARITIES:
+            raise ValueError(
+                f"similarity must be one of {_VALID_SIMILARITIES}, "
+                f"got {self.similarity!r}."
+            )
+
+        if self.similarity == "correlation":
+            C = (
+                corr_matrix
+                if corr_matrix is not None
+                else np.corrcoef(X, rowvar=False)
+            )
+        else:
+            C = (
+                mi_matrix
+                if mi_matrix is not None
+                else _build_similarity(
+                    X,
+                    self.similarity,
+                    self.mi_n_neighbors,
+                    self.mi_normalize,
+                    self.mi_n_jobs,
+                    self.mi_random_state,
+                )
+            )
+            # LoGo inverts clique sub-matrices, so it needs an actual covariance,
+            # not the MI similarity.  Fall back to the empirical covariance when
+            # the caller did not provide one.
+            if cov_matrix is None:
+                cov_matrix = empirical_covariance(
+                    X, assume_centered=self.assume_centered
+                )
 
         # run MFCF algorithm over a similarity/affinity matrix.
         builder = _MFCFBuilder(
@@ -197,11 +302,24 @@ def _mfcf_logo_cv_one_fold(
 
     Defined at module scope (not as a method) so :mod:`joblib` can
     pickle it under the ``loky`` backend for inter-process dispatch.
-    The expensive ``np.corrcoef`` call is done once per fold and
-    shared with every ``max_clique_size`` evaluation.
+    The similarity matrix is computed once per fold and shared with
+    every ``max_clique_size`` evaluation.
     """
     S_val = empirical_covariance(X_va, assume_centered=params["assume_centered"])
-    C_tr = np.corrcoef(X_tr, rowvar=False)
+    similarity = params.get("similarity", "correlation")
+    if similarity == "correlation":
+        C_tr = np.corrcoef(X_tr, rowvar=False)
+        M_tr = None
+    else:
+        C_tr = None
+        M_tr = _build_similarity(
+            X_tr,
+            similarity,
+            params["mi_n_neighbors"],
+            params["mi_normalize"],
+            params["mi_n_jobs"],
+            params["mi_random_state"],
+        )
     out = []
     for k in grid:
         try:
@@ -211,9 +329,14 @@ def _mfcf_logo_cv_one_fold(
                 max_clique_size=k,
                 coordination_number=params["coordination_number"],
                 gain_function_type=params["gain_function_type"],
+                similarity=similarity,
+                mi_n_neighbors=params["mi_n_neighbors"],
+                mi_normalize=params["mi_normalize"],
+                mi_n_jobs=params["mi_n_jobs"],
+                mi_random_state=params["mi_random_state"],
                 assume_centered=params["assume_centered"],
             )
-            base.fit(X_tr, corr_matrix=C_tr)
+            base.fit(X_tr, corr_matrix=C_tr, mi_matrix=M_tr)
             precision_ = base.precision_
             if not np.all(np.isfinite(precision_)):
                 raise ValueError("Non-finite entries in precision_.")
@@ -278,6 +401,15 @@ class MFCFLoGoCV(EmpiricalCovariance):
         Gain function type to use in MFCF construction. The function is used to
         determine which vertext to add next to maximize the overall gain in the
         graph.
+
+    similarity : {'correlation', 'mutual_information'}, default='correlation'
+        Similarity used to score MFCF gains.  See :class:`MFCFLoGo` for
+        details.  When ``'mutual_information'`` is chosen the KSG MI matrix is
+        computed once per training fold and shared across the grid.
+
+    mi_n_neighbors, mi_normalize, mi_n_jobs, mi_random_state
+        Forwarded to the KSG estimator.  Only used when
+        ``similarity='mutual_information'``.
 
     assume_centered : bool, default=False
         If True, data are not centered before computation.
@@ -346,6 +478,11 @@ class MFCFLoGoCV(EmpiricalCovariance):
         min_clique_size: int = 1,
         coordination_number: int = np.inf,
         gain_function_type: str = "sumsquares",
+        similarity: str = "correlation",
+        mi_n_neighbors: int = 3,
+        mi_normalize: str = "linfoot",
+        mi_n_jobs: Optional[int] = None,
+        mi_random_state: Optional[int] = None,
         assume_centered: bool = False,
         # scoring / robustness
         error_score: Union[str, float] = np.nan,
@@ -361,6 +498,11 @@ class MFCFLoGoCV(EmpiricalCovariance):
         self.min_clique_size = min_clique_size
         self.coordination_number = coordination_number
         self.gain_function_type = gain_function_type
+        self.similarity = similarity
+        self.mi_n_neighbors = mi_n_neighbors
+        self.mi_normalize = mi_normalize
+        self.mi_n_jobs = mi_n_jobs
+        self.mi_random_state = mi_random_state
         self.assume_centered = assume_centered
 
         self.error_score = error_score
@@ -431,6 +573,11 @@ class MFCFLoGoCV(EmpiricalCovariance):
             min_clique_size=self.min_clique_size,
             coordination_number=self.coordination_number,
             gain_function_type=self.gain_function_type,
+            similarity=self.similarity,
+            mi_n_neighbors=self.mi_n_neighbors,
+            mi_normalize=self.mi_normalize,
+            mi_n_jobs=self.mi_n_jobs,
+            mi_random_state=self.mi_random_state,
             assume_centered=self.assume_centered,
         )
 
@@ -497,6 +644,11 @@ class MFCFLoGoCV(EmpiricalCovariance):
             max_clique_size=best_k,
             coordination_number=self.coordination_number,
             gain_function_type=self.gain_function_type,
+            similarity=self.similarity,
+            mi_n_neighbors=self.mi_n_neighbors,
+            mi_normalize=self.mi_normalize,
+            mi_n_jobs=self.mi_n_jobs,
+            mi_random_state=self.mi_random_state,
             assume_centered=self.assume_centered,
         )
         final.fit(X)
@@ -585,6 +737,15 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         determine which vertext to add next to maximize the overall gain in the
         graph.
 
+    similarity : {'correlation', 'mutual_information'}, default='correlation'
+        Similarity used to score MFCF gains.  See :class:`MFCFLoGo` for
+        details.  This option is forwarded to every trial; it is not part of
+        the Optuna search space.
+
+    mi_n_neighbors, mi_normalize, mi_n_jobs, mi_random_state
+        Forwarded to the KSG estimator.  Only used when
+        ``similarity='mutual_information'``.
+
     assume_centered : bool, default=False
         If True, data are not centered before computation.
         Useful when working with data whose mean is almost, but not exactly
@@ -655,6 +816,11 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         max_clique_size: int = 4,
         coordination_number: int = np.inf,
         gain_function_type: str = "sumsquares",
+        similarity: str = "correlation",
+        mi_n_neighbors: int = 3,
+        mi_normalize: str = "linfoot",
+        mi_n_jobs: Optional[int] = None,
+        mi_random_state: Optional[int] = None,
         assume_centered: bool = False,
         # scoring / robustness
         error_score: Union[str, float] = np.nan,
@@ -672,9 +838,23 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         self.min_clique_size = min_clique_size
         self.coordination_number = coordination_number
         self.gain_function_type = gain_function_type
+        self.similarity = similarity
+        self.mi_n_neighbors = mi_n_neighbors
+        self.mi_normalize = mi_normalize
+        self.mi_n_jobs = mi_n_jobs
+        self.mi_random_state = mi_random_state
         self.assume_centered = assume_centered
 
         self.error_score = error_score
+
+    def _fixed_similarity_params(self) -> Dict[str, Any]:
+        return dict(
+            similarity=self.similarity,
+            mi_n_neighbors=self.mi_n_neighbors,
+            mi_normalize=self.mi_normalize,
+            mi_n_jobs=self.mi_n_jobs,
+            mi_random_state=self.mi_random_state,
+        )
 
     def _process_params(self, trial: optuna.Trial, n_features: int) -> Dict[str, Any]:
         params = dict(
@@ -683,6 +863,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             max_clique_size=self.max_clique_size,
             coordination_number=self.coordination_number,
         )
+        params.update(self._fixed_similarity_params())
         if not self.tunable_params:
             return params
 
@@ -745,6 +926,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             max_clique_size=self.max_clique_size,
             coordination_number=self.coordination_number,
         )
+        final_params.update(self._fixed_similarity_params())
         final_params.update(best_params)
         # print(best_params, flush=True)
 

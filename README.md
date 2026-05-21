@@ -104,6 +104,62 @@ best_params = tuned.estimator_
 - Uses Optuna-backed cross-validation to tune any combination of threshold, clique sizes, and coordination cap.
 - `estimator_` stores the final `MFCFLoGo` instance fitted with the best parameters.
 
+### Using Mutual Information Instead of Correlation
+Pearson correlation is only the right similarity when the variables are
+jointly Gaussian. Outside that regime — fat tails, regime shifts, non-linear
+co-movement — it can grossly under-state the dependence structure. The
+estimators accept `similarity="mutual_information"` to score MFCF gains with
+a pairwise mutual-information matrix instead:
+
+```python
+from mfcf_logo import MFCFLoGo
+
+est = MFCFLoGo(
+    similarity="mutual_information",
+    mi_n_neighbors=3,         # KSG neighbours, robust around 3-6
+    mi_normalize="linfoot",   # default; sqrt(1 - exp(-2 I)) in [0, 1]
+    mi_n_jobs=-1,             # forwarded to sklearn (>= 1.5)
+    mi_random_state=0,
+    max_clique_size=4,
+)
+est.fit(X)
+```
+
+- The MI matrix is computed with the Kraskov–Stögbauer–Grassberger k-NN
+  estimator (Kraskov, Stögbauer, Grassberger, *Phys. Rev. E* 69, 066138,
+  2004). It is fully non-parametric, asymptotically unbiased, and is the
+  de-facto standard estimator for continuous MI.
+- Two backends ship behind a `backend` switch on
+  `mutual_information_matrix`: `"numba"` (default when available) runs a
+  hand-rolled parallel KSG kernel and is typically 5–20× faster than the
+  `"sklearn"` reference path (which delegates to
+  `sklearn.feature_selection.mutual_info_regression`). Both produce KSG
+  algorithm-1 estimates and agree to numerical tolerance; the numba kernel
+  is `O(n^2)` per pair while sklearn uses an `O(n log n)` k-d tree, so the
+  edge shrinks at very large `n`.
+- Entries are then mapped through Linfoot's informational correlation
+  coefficient `rho_I = sqrt(1 - exp(-2 I))` (Linfoot, *Inf. Control* 1(1),
+  1957), so the matrix lives in `[0, 1]` and collapses to `|Pearson rho|`
+  exactly under joint Gaussianity. The MI path is therefore a strict
+  generalisation of the correlation path.
+- The LoGo aggregation step still uses the empirical (or user-supplied)
+  covariance matrix, because clique-wise inversion requires an actual
+  covariance, not an MI matrix.
+- `MFCFLoGoCV` and `MFCFLoGoCVAll` expose the same arguments. The MI matrix
+  is computed once per training fold and shared across the
+  `max_clique_size` grid.
+- You can also build the MI matrix yourself and pass it through:
+
+  ```python
+  from mutual_information import mutual_information_matrix
+
+  M = mutual_information_matrix(X, n_neighbors=3, normalize="linfoot")
+  MFCFLoGo(similarity="mutual_information").fit(X, mi_matrix=M)
+  ```
+
+Note that KSG is `O(p^2 * n * log n)` and materially slower than
+`np.corrcoef`; use `mi_n_jobs=-1` on large feature counts.
+
 ### Hierarchical Clustering with DBHT (`mfcf_dbht()`)
 ```python
 import numpy as np
