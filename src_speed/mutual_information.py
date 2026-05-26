@@ -8,35 +8,36 @@ Mutual information ``I(X;Y)`` is the right replacement: it is zero iff ``X``
 and ``Y`` are independent and is invariant under any monotone reparametrisation
 of the marginals.
 
-Estimator
----------
-We use the Kraskov–Stögbauer–Grassberger (KSG) k-nearest-neighbour estimator
-(Kraskov, Stögbauer, Grassberger, "Estimating mutual information", Phys. Rev.
-E 69, 066138, 2004), algorithm 1.  KSG is fully non-parametric, asymptotically
-unbiased, adaptive to local data density, and is the de-facto standard in the
-modern information-theoretic literature.
+This module ships the Kraskov–Stögbauer–Grassberger k-nearest-neighbour
+estimator (Kraskov, Stögbauer, Grassberger, "Estimating mutual information",
+*Phys. Rev. E* 69, 066138, 2004) — non-parametric, asymptotically unbiased,
+adaptive to local data density, and capable of capturing arbitrary non-linear
+dependence including the tails.  Cost is ``O(p^2 * n^{3/2})`` (numba kernel
+below); inherently more expensive than correlation because every column pair
+needs its own neighbour search.
 
-This module ships two backends:
+Backends
+--------
+The KSG estimator has two backends:
 
-* ``"numba"`` — a hand-rolled parallel implementation that processes every
-  column pair in its own thread, computes the joint Chebyshev k-th-NN by a
-  tight in-loop insertion sort over a length-``k+1`` scratch buffer, and uses
-  a precomputed digamma lookup table.  Typically 5-20× faster than the
-  scikit-learn path; the edge shrinks at very large ``n`` because this kernel
-  is ``O(n^2)`` per pair while sklearn uses an ``O(n log n)`` k-d tree.
-* ``"sklearn"`` — delegates to ``sklearn.feature_selection.mutual_info_regression``
-  for every target column.  Slower but the canonical reference, kept as the
-  validation backend.
-
-Both backends produce KSG algorithm 1 estimates and agree to numerical
-tolerance.
+* ``"numba"`` — hand-rolled parallel kernel.  Per pair, instead of the naive
+  ``O(n^2)`` two-pass scan it (a) sorts each column once up front, then for
+  each query expands two pointers outward in x-sorted order, computes joint
+  Chebyshev distances on the fly, and stops as soon as the next x-only
+  distance exceeds the current k-th joint distance; and (b) replaces the
+  marginal-count pass with two ``O(log n)`` binary searches on the sorted
+  columns.  Typical scan length is ``~3 sqrt(n)`` for k=3 rather than ``n``.
+* ``"sklearn"`` — reference path via
+  ``sklearn.feature_selection.mutual_info_regression``; both produce KSG
+  algorithm-1 estimates and agree to numerical tolerance.
 
 Normalisation
 -------------
 Raw ``I(X;Y) \\in [0, \\infty)`` is not directly comparable across pairs and is
 not on the same scale as the squared-correlation gain used by MFCF.  We
 therefore default to Linfoot's *informational coefficient of correlation*
-(Linfoot, "An informational measure of correlation", Inf. Control 1(1), 1957)
+(Linfoot, "An informational measure of correlation", *Inf. Control* 1(1),
+1957)
 
     rho_I = sqrt( 1 - exp(-2 * I) )    in [0, 1]
 
@@ -107,45 +108,91 @@ def _digamma_int_table(n: int) -> np.ndarray:
 # -----------------------------------------------------------------------------
 # Numba KSG backend
 # -----------------------------------------------------------------------------
+@njit(cache=True, inline="always", boundscheck=False)
+def _bisect_right(a: np.ndarray, x: float, n: int) -> int:
+    """Smallest ``i`` with ``a[i] > x`` (sorted ``a``, half-open ``[0, n)``)."""
+    lo = 0
+    hi = n
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        if a[mid] <= x:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+@njit(cache=True, inline="always", boundscheck=False)
+def _bisect_left(a: np.ndarray, x: float, n: int) -> int:
+    """Smallest ``i`` with ``a[i] >= x`` (sorted ``a``, half-open ``[0, n)``)."""
+    lo = 0
+    hi = n
+    while lo < hi:
+        mid = (lo + hi) >> 1
+        if a[mid] < x:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
 @njit(parallel=True, cache=True, boundscheck=False, fastmath=True)
-def _ksg_matrix_numba(XT: np.ndarray, k: int, psi: np.ndarray, M: np.ndarray) -> None:
+def _ksg_matrix_numba(
+    XT: np.ndarray,
+    sorted_cols: np.ndarray,
+    argsort_cols: np.ndarray,
+    ranks_cols: np.ndarray,
+    k: int,
+    psi: np.ndarray,
+    M: np.ndarray,
+) -> None:
     """Fill the upper+lower triangle of ``M`` with KSG MI estimates.
 
     Parameters
     ----------
-    XT : np.ndarray, shape (p, n), C-contiguous
+    XT : np.ndarray, shape (p, n), C-contiguous, float64
         Transposed data; row ``i`` is column ``i`` of the original ``X``.
+    sorted_cols : np.ndarray, shape (p, n), C-contiguous, float64
+        ``sorted_cols[i]`` is column ``i`` sorted ascending.
+    argsort_cols : np.ndarray, shape (p, n), C-contiguous, int64
+        ``argsort_cols[i, r]`` is the original index whose value sits at
+        sorted rank ``r`` in column ``i``.
+    ranks_cols : np.ndarray, shape (p, n), C-contiguous, int64
+        ``ranks_cols[i, ii]`` is the sorted rank of point ``ii`` in column
+        ``i`` (inverse permutation of ``argsort_cols``).
     k : int
         Number of neighbours (algorithm 1).
-    psi : np.ndarray, shape (n,)
+    psi : np.ndarray, shape (n,), float64
         Precomputed digamma table with ``psi[m] = digamma(m + 1)``.
-    M : np.ndarray, shape (p, p)
+    M : np.ndarray, shape (p, p), float64
         Output buffer.  Diagonal is left untouched.
 
-    Notes
-    -----
-    Per column-pair ``(i, j)``, for every query point we (a) scan the other
-    ``n - 1`` points keeping a sorted top-``k`` of joint Chebyshev distances
-    and (b) re-scan to count marginal neighbours strictly inside the radius
-    of the ``k``-th joint neighbour.  All allocations are hoisted out of the
-    query loop into a per-thread scratch buffer.
+    Algorithm
+    ---------
+    Per column-pair ``(i, j)`` and per query point ``ii``:
+
+    1) **Joint k-NN via two-pointer expansion in x-sorted order.**  Starting
+       from the query's position in ``argsort_cols[i]``, expand ``left`` /
+       ``right`` outward, always picking the side with the smaller x-distance.
+       Compute the joint Chebyshev distance against ``XT[j, jj]`` and slide it
+       into a length-``k`` sorted scratch.  As soon as the next available
+       x-distance is ``>=`` the current k-th joint distance, all unseen points
+       must have joint distance at least that large, so we stop.  Expected
+       scan length is ``~3 sqrt(n)`` for ``k=3`` on uniform data, vs ``n``
+       for the naive scan.
+    2) **Marginal counts via binary search.**  ``n_x`` is the number of points
+       with x-distance strictly less than the k-th joint distance: two
+       ``bisect`` calls on ``sorted_cols[i]`` give the open-interval count in
+       ``O(log n)``.  Same for ``n_y``.  Self is subtracted iff ``eps > 0``.
     """
     p = XT.shape[0]
     n = XT.shape[1]
     digamma_k = psi[k - 1]
     digamma_n = psi[n - 1]
 
-    # Trick to drop the ``if jj == ii: continue`` branch from both inner
-    # passes: scan all ``n`` points (including self at distance 0), keep the
-    # ``k+1`` smallest joint distances so ``top_k[k]`` is the distance to the
-    # k-th non-self neighbour, and subtract self's contribution from the
-    # marginal counts at the end (it contributes iff ``eps > 0``).
-    kp1 = k + 1
-
-    # ``prange`` over the column index ``j``; each thread owns its own
-    # ``top_k`` scratch buffer for the duration of its slice of ``j``s.
     for j in prange(1, p):
-        top_k = np.empty(kp1, dtype=np.float64)
+        # Per-thread scratch buffer for the top-k joint distances.
+        top_k = np.empty(k, dtype=np.float64)
 
         for i in range(j):
             sum_psi = 0.0
@@ -153,46 +200,70 @@ def _ksg_matrix_numba(XT: np.ndarray, k: int, psi: np.ndarray, M: np.ndarray) ->
             for ii in range(n):
                 xi = XT[i, ii]
                 yi = XT[j, ii]
+                pos_x = ranks_cols[i, ii]
 
-                for kk in range(kp1):
+                for kk in range(k):
                     top_k[kk] = np.inf
 
-                # First pass: collect the ``k+1`` smallest joint distances.
-                # Self lives in slot 0 with d = 0.
-                for jj in range(n):
-                    dx = xi - XT[i, jj]
-                    if dx < 0.0:
-                        dx = -dx
+                left = pos_x - 1
+                right = pos_x + 1
+                eps_curr = np.inf  # = top_k[k - 1]
+
+                while True:
+                    # Pick the side with smaller x-distance.
+                    if left < 0:
+                        if right >= n:
+                            break
+                        dx_next = sorted_cols[i, right] - xi
+                        next_sorted_idx = right
+                        right += 1
+                    elif right >= n:
+                        dx_next = xi - sorted_cols[i, left]
+                        next_sorted_idx = left
+                        left -= 1
+                    else:
+                        dl = xi - sorted_cols[i, left]
+                        dr = sorted_cols[i, right] - xi
+                        if dl <= dr:
+                            dx_next = dl
+                            next_sorted_idx = left
+                            left -= 1
+                        else:
+                            dx_next = dr
+                            next_sorted_idx = right
+                            right += 1
+
+                    # No further point can shrink the k-th joint distance.
+                    if dx_next >= eps_curr:
+                        break
+
+                    jj = argsort_cols[i, next_sorted_idx]
                     dy = yi - XT[j, jj]
                     if dy < 0.0:
                         dy = -dy
-                    d = dx if dx > dy else dy
+                    d = dx_next if dx_next > dy else dy
 
-                    if d < top_k[k]:
-                        pos = k
+                    if d < eps_curr:
+                        # Insertion-sort into length-k scratch.
+                        pos = k - 1
                         while pos > 0 and top_k[pos - 1] > d:
                             top_k[pos] = top_k[pos - 1]
                             pos -= 1
                         top_k[pos] = d
+                        eps_curr = top_k[k - 1]
 
-                eps = top_k[k]
+                eps = top_k[k - 1]
 
-                # Second pass: marginal counts (still strictly inside eps).
-                nx = 0
-                ny = 0
-                for jj in range(n):
-                    dx = xi - XT[i, jj]
-                    if dx < 0.0:
-                        dx = -dx
-                    if dx < eps:
-                        nx += 1
-                    dy = yi - XT[j, jj]
-                    if dy < 0.0:
-                        dy = -dy
-                    if dy < eps:
-                        ny += 1
+                # Marginal counts via bisect on the sorted columns.  Open
+                # interval (xi - eps, xi + eps), excluding self when eps > 0.
+                lo_x = _bisect_right(sorted_cols[i], xi - eps, n)
+                hi_x = _bisect_left(sorted_cols[i], xi + eps, n)
+                nx = hi_x - lo_x
 
-                # Self contributed (dx == 0 < eps) iff eps > 0; subtract it.
+                lo_y = _bisect_right(sorted_cols[j], yi - eps, n)
+                hi_y = _bisect_left(sorted_cols[j], yi + eps, n)
+                ny = hi_y - lo_y
+
                 if eps > 0.0:
                     nx -= 1
                     ny -= 1
@@ -255,7 +326,7 @@ def mutual_information_matrix(
     random_state: Optional[int] = None,
     backend: _BackendKind = "auto",
 ) -> np.ndarray:
-    """Pairwise mutual-information similarity matrix.
+    """Pairwise mutual-information similarity matrix (KSG estimator).
 
     Parameters
     ----------
@@ -267,17 +338,17 @@ def mutual_information_matrix(
     normalize : {"linfoot", "none"}, default="linfoot"
         ``"linfoot"`` applies ``sqrt(1 - exp(-2 I))`` so entries live in
         ``[0, 1]`` and match ``|Pearson rho|`` under Gaussianity.  ``"none"``
-        keeps the raw KSG estimate (clipped to ``>= 0``).
+        keeps the raw estimate (clipped to ``>= 0``).
     n_jobs : int or None, default=None
-        Thread count.  Forwarded to numba (when the ``numba`` backend is
-        used) or to ``sklearn.feature_selection.mutual_info_regression``
-        (sklearn >= 1.5) otherwise.  ``None`` keeps the backend default
-        (numba uses all cores; sklearn uses one).
+        Thread count for the KSG ``numba`` backend (or sklearn's
+        ``mutual_info_regression`` when that backend is used).  ``None``
+        keeps the backend default.
     random_state : int or None, default=None
         Seed for the tiny Gaussian jitter that breaks ties (standard
         Kraskov-2004 preprocessing).
     backend : {"auto", "numba", "sklearn"}, default="auto"
-        ``"auto"`` picks numba when it is importable, else sklearn.
+        KSG backend selector.  ``"auto"`` picks numba when it is importable,
+        else sklearn.
 
     Returns
     -------
@@ -288,10 +359,9 @@ def mutual_information_matrix(
 
     Notes
     -----
-    The numba backend parallelises over column pairs.  On realistic problem
-    sizes (``p ~ 10^3``, ``n ~ 10^2-10^3``) it is roughly two orders of
-    magnitude faster than the sklearn path, which builds a separate k-d tree
-    per pair.
+    KSG is asymptotically the most informative choice but inherently costs
+    one neighbour search per column pair, so its wall time grows like ``p^2``
+    rather than the ``p^2 n`` of a single matrix multiply.
     """
     if normalize not in ("linfoot", "none"):
         raise ValueError(
@@ -311,6 +381,10 @@ def mutual_information_matrix(
         raise ValueError(
             f"Need at least n_neighbors + 1 = {n_neighbors + 1} samples for "
             f"the KSG estimator, got {n_samples}."
+        )
+    if n_samples < 2:
+        raise ValueError(
+            f"Need at least 2 samples, got {n_samples}."
         )
 
     diag_value = 1.0 if normalize == "linfoot" else 0.0
@@ -335,6 +409,15 @@ def mutual_information_matrix(
     if use_numba:
         # Row-major transpose so each column (now a row) is contiguous.
         XT = np.ascontiguousarray(X_work.T)
+        # Per-column sort: argsort gives the rank-to-index map; the inverse
+        # permutation is the rank of every original index.  This is the
+        # entire precomputation needed by the two-pointer kernel.
+        argsort_cols = np.argsort(XT, axis=1, kind="quicksort").astype(np.int64)
+        sorted_cols = np.take_along_axis(XT, argsort_cols, axis=1)
+        ranks_cols = np.empty_like(argsort_cols)
+        _idx = np.arange(n_samples, dtype=np.int64)
+        for _p in range(n_features):
+            ranks_cols[_p, argsort_cols[_p]] = _idx
         psi = _digamma_int_table(n_samples)
         M = np.zeros((n_features, n_features), dtype=np.float64)
 
@@ -342,11 +425,17 @@ def mutual_information_matrix(
             _orig = numba.get_num_threads()
             numba.set_num_threads(int(n_jobs))
             try:
-                _ksg_matrix_numba(XT, int(n_neighbors), psi, M)
+                _ksg_matrix_numba(
+                    XT, sorted_cols, argsort_cols, ranks_cols,
+                    int(n_neighbors), psi, M,
+                )
             finally:
                 numba.set_num_threads(_orig)
         else:
-            _ksg_matrix_numba(XT, int(n_neighbors), psi, M)
+            _ksg_matrix_numba(
+                XT, sorted_cols, argsort_cols, ranks_cols,
+                int(n_neighbors), psi, M,
+            )
 
         # Clip to guard against tiny negative values from the digamma table
         # plus floating-point noise (the kernel already clips per pair).

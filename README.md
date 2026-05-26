@@ -4,7 +4,7 @@ Accelerated Maximally Filtered Clique Forest (MFCF) implementations for sparse p
 
 ## Introduction
 - Build MFCF backbones from dense similarity matrices in a few seconds.
-- Drop-in graphical-model estimators (`MFCFLoGO`, `MFCFLoGOCV`, `MFCFLoGOCVAll`) that follow the scikit-learn API and offer a faster, more accurate alternative to Graphical Lasso when the sample-to-feature ratio is small.
+- Drop-in graphical-model estimators (`MFCFLoGo`, `MFCFLoGoCV`, `MFCFLoGoCVAll`) that follow the scikit-learn API and offer a faster, more accurate alternative to Graphical Lasso when the sample-to-feature ratio is small.
 - Extend Riskfolio-Lib’s Direct Bubble Hierarchical Tree (DBHT) pipeline so it can operate over any MFCF backbone instead of only TMFG graphs (`mfcf_dbht`).
 
 ## Getting Started
@@ -49,7 +49,7 @@ cliques, separators, peo, logo = builder.run(C=C, cov_matrix=Cov)
 - `peo`: perfect elimination order collected during growth.
 - `logo`: sparse inverse assembled from clique and separator inverses.
 
-### Precision Estimation (`MFCFLoGO()`)
+### Precision Estimation (`MFCFLoGo()`)
 ```python
 import numpy as np
 from mfcf_logo import MFCFLoGo  # the "mfcflogo" estimator
@@ -68,7 +68,7 @@ covariance = est.get_covariance()
 - Fully scikit-learn compatible: works with `Pipeline`, `GridSearchCV`, and scoring utilities.
 - In many low-sample/high-dimensional regimes it runs faster and attains higher accuracy than Graphical Lasso while keeping interpretation straightforward through clique structure.
 
-### Cross-validated Precision (`mfcflogocv()`)
+### Cross-validated Precision (`MFCFLoGoCV()`)
 ```python
 from mfcf_logo import MFCFLoGoCV
 
@@ -86,7 +86,7 @@ best_precision = cv_est.get_precision()
 - Automatically selects `max_clique_size` via K-fold log-likelihood scoring.
 - Keeps full diagnostics in `cv_results_` and per-fold records in `fold_scores_`.
 
-### Automated Hyperparameter Search (`mfcflogocvall()`)
+### Automated Hyperparameter Search (`MFCFLoGoCVAll()`)
 ```python
 from mfcf_logo import MFCFLoGoCVAll
 
@@ -99,17 +99,14 @@ tuned = MFCFLoGoCVAll(
 )
 tuned.fit(X)
 best_covariance = tuned.get_covariance()
-best_params = tuned.estimator_
+best_estimator = tuned.estimator_
 ```
 - Uses Optuna-backed cross-validation to tune any combination of threshold, clique sizes, and coordination cap.
 - `estimator_` stores the final `MFCFLoGo` instance fitted with the best parameters.
 
 ### Using Mutual Information Instead of Correlation
 Pearson correlation is only the right similarity when the variables are
-jointly Gaussian. Outside that regime — fat tails, regime shifts, non-linear
-co-movement — it can grossly under-state the dependence structure. The
-estimators accept `similarity="mutual_information"` to score MFCF gains with
-a pairwise mutual-information matrix instead:
+jointly Gaussian. Outside that regime (e.g., fat tails, regime shifts, non-linear co-movement) it can grossly under-state the dependence structure. The estimators accept `similarity="mutual_information"` to score MFCF gains with a pairwise mutual-information matrix instead. The matrix is built with the Kraskov–Stögbauer–Grassberger (KSG) k-nearest-neighbour estimator (Kraskov, Stögbauer, Grassberger, *Phys. Rev. E* 69, 066138, 2004).
 
 ```python
 from mfcf_logo import MFCFLoGo
@@ -117,48 +114,29 @@ from mfcf_logo import MFCFLoGo
 est = MFCFLoGo(
     similarity="mutual_information",
     mi_n_neighbors=3,         # KSG neighbours, robust around 3-6
-    mi_normalize="linfoot",   # default; sqrt(1 - exp(-2 I)) in [0, 1]
-    mi_n_jobs=-1,             # forwarded to sklearn (>= 1.5)
+    mi_normalize="linfoot",   # sqrt(1 - exp(-2 I)) in [0, 1]
+    mi_n_jobs=-1,             # forwarded to the KSG numba/sklearn backend
     mi_random_state=0,
     max_clique_size=4,
 )
 est.fit(X)
 ```
 
-- The MI matrix is computed with the Kraskov–Stögbauer–Grassberger k-NN
-  estimator (Kraskov, Stögbauer, Grassberger, *Phys. Rev. E* 69, 066138,
-  2004). It is fully non-parametric, asymptotically unbiased, and is the
-  de-facto standard estimator for continuous MI.
-- Two backends ship behind a `backend` switch on
-  `mutual_information_matrix`: `"numba"` (default when available) runs a
-  hand-rolled parallel KSG kernel and is typically 5–20× faster than the
-  `"sklearn"` reference path (which delegates to
-  `sklearn.feature_selection.mutual_info_regression`). Both produce KSG
-  algorithm-1 estimates and agree to numerical tolerance; the numba kernel
-  is `O(n^2)` per pair while sklearn uses an `O(n log n)` k-d tree, so the
-  edge shrinks at very large `n`.
-- Entries are then mapped through Linfoot's informational correlation
-  coefficient `rho_I = sqrt(1 - exp(-2 I))` (Linfoot, *Inf. Control* 1(1),
-  1957), so the matrix lives in `[0, 1]` and collapses to `|Pearson rho|`
-  exactly under joint Gaussianity. The MI path is therefore a strict
-  generalisation of the correlation path.
+The MI matrix uses Linfoot's informational correlation coefficient
+`rho_I = sqrt(1 - exp(-2 I))` (Linfoot, *Inf. Control* 1(1), 1957), so
+entries live in `[0, 1]` and collapse to `|Pearson rho|` exactly under joint
+Gaussianity — the MI path is a strict generalisation of the correlation
+path.
+
 - The LoGo aggregation step still uses the empirical (or user-supplied)
   covariance matrix, because clique-wise inversion requires an actual
   covariance, not an MI matrix.
-- `MFCFLoGoCV` and `MFCFLoGoCVAll` expose the same arguments. The MI matrix
-  is computed once per training fold and shared across the
-  `max_clique_size` grid.
-- You can also build the MI matrix yourself and pass it through:
-
-  ```python
-  from mutual_information import mutual_information_matrix
-
-  M = mutual_information_matrix(X, n_neighbors=3, normalize="linfoot")
-  MFCFLoGo(similarity="mutual_information").fit(X, mi_matrix=M)
-  ```
-
-Note that KSG is `O(p^2 * n * log n)` and materially slower than
-`np.corrcoef`; use `mi_n_jobs=-1` on large feature counts.
+- `MFCFLoGoCV` accepts the same MI arguments and computes the MI matrix
+  once per training fold, sharing it across the `max_clique_size` grid.
+  `MFCFLoGoCVAll` also accepts the same MI arguments; because Optuna draws
+  one parameter set per trial, the MI matrix is rebuilt each trial.
+- You can also build the MI matrix yourself and pass it through `fit` via
+  the `mi_matrix=` keyword, which skips the internal KSG call.
 
 ### Hierarchical Clustering with DBHT (`mfcf_dbht()`)
 ```python

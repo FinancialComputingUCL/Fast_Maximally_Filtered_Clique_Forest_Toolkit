@@ -70,10 +70,8 @@ class MFCFLoGo(EmpiricalCovariance):
     similarity : {'correlation', 'mutual_information'}, default='correlation'
         Similarity used to score MFCF gains.  ``'correlation'`` uses Pearson
         correlation (assumes joint Gaussianity).  ``'mutual_information'``
-        builds the pairwise MI matrix with the Kraskov–Stögbauer–Grassberger
-        k-NN estimator (Kraskov et al. 2004) and, by default, transforms it
-        with Linfoot's informational correlation coefficient so entries live
-        in ``[0, 1]`` and reduce to ``|Pearson rho|`` under Gaussianity.
+        builds the pairwise MI matrix via the Kraskov-Stögbauer-Grassberger
+        non-parametric k-NN estimator.
 
     mi_n_neighbors : int, default=3
         Number of neighbours for the KSG estimator.  Only used when
