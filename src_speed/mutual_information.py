@@ -142,11 +142,28 @@ def _ksg_matrix_numba(
     sorted_cols: np.ndarray,
     argsort_cols: np.ndarray,
     ranks_cols: np.ndarray,
+    pair_i: np.ndarray,
+    pair_j: np.ndarray,
     k: int,
     psi: np.ndarray,
     M: np.ndarray,
 ) -> None:
     """Fill the upper+lower triangle of ``M`` with KSG MI estimates.
+
+    The kernel walks each query's neighbours in sorted-x order via a
+    two-pointer scan, tracks value-space joint Chebyshev distances in a
+    length-``k`` insertion-sort buffer, and resolves marginal counts via
+    bisect on the sorted columns.  Parallelism is over a flat enumeration
+    of upper-triangle pairs so every thread gets a balanced workload — the
+    natural nested-loop ordering put ``O(p)`` work on the last thread and
+    ``O(1)`` on the first.
+
+    A rank-space variant (replace value Chebyshev with integer rank
+    Chebyshev throughout, and use closed-form marginal counts) was tried
+    and is materially faster, but its deterministic marginal counts
+    inflate the small-MI estimate enough to push rho≈0 outside the
+    Linfoot collapse tolerance — i.e., it breaks the headline correctness
+    property of this module.
 
     Parameters
     ----------
@@ -160,122 +177,113 @@ def _ksg_matrix_numba(
     ranks_cols : np.ndarray, shape (p, n), C-contiguous, int64
         ``ranks_cols[i, ii]`` is the sorted rank of point ``ii`` in column
         ``i`` (inverse permutation of ``argsort_cols``).
+    pair_i, pair_j : np.ndarray, shape (P,), int64
+        Flat enumeration of every upper-triangle column pair with ``i < j``.
     k : int
         Number of neighbours (algorithm 1).
     psi : np.ndarray, shape (n,), float64
         Precomputed digamma table with ``psi[m] = digamma(m + 1)``.
     M : np.ndarray, shape (p, p), float64
         Output buffer.  Diagonal is left untouched.
-
-    Algorithm
-    ---------
-    Per column-pair ``(i, j)`` and per query point ``ii``:
-
-    1) **Joint k-NN via two-pointer expansion in x-sorted order.**  Starting
-       from the query's position in ``argsort_cols[i]``, expand ``left`` /
-       ``right`` outward, always picking the side with the smaller x-distance.
-       Compute the joint Chebyshev distance against ``XT[j, jj]`` and slide it
-       into a length-``k`` sorted scratch.  As soon as the next available
-       x-distance is ``>=`` the current k-th joint distance, all unseen points
-       must have joint distance at least that large, so we stop.  Expected
-       scan length is ``~3 sqrt(n)`` for ``k=3`` on uniform data, vs ``n``
-       for the naive scan.
-    2) **Marginal counts via binary search.**  ``n_x`` is the number of points
-       with x-distance strictly less than the k-th joint distance: two
-       ``bisect`` calls on ``sorted_cols[i]`` give the open-interval count in
-       ``O(log n)``.  Same for ``n_y``.  Self is subtracted iff ``eps > 0``.
     """
-    p = XT.shape[0]
     n = XT.shape[1]
+    P = pair_i.shape[0]
     digamma_k = psi[k - 1]
     digamma_n = psi[n - 1]
 
-    for j in prange(1, p):
-        # Per-thread scratch buffer for the top-k joint distances.
+    for t in prange(P):
+        i = pair_i[t]
+        j = pair_j[t]
+
+        # Length-k scratch for the top-k joint distances.  Stack-resident
+        # (numba lowers small np.empty inside prange to per-iter locals).
         top_k = np.empty(k, dtype=np.float64)
 
-        for i in range(j):
-            sum_psi = 0.0
+        sum_psi = 0.0
 
-            for ii in range(n):
-                xi = XT[i, ii]
-                yi = XT[j, ii]
-                pos_x = ranks_cols[i, ii]
+        for ii in range(n):
+            xi = XT[i, ii]
+            yi = XT[j, ii]
+            pos_x = ranks_cols[i, ii]
 
-                for kk in range(k):
-                    top_k[kk] = np.inf
+            for kk in range(k):
+                top_k[kk] = np.inf
 
-                left = pos_x - 1
-                right = pos_x + 1
-                eps_curr = np.inf  # = top_k[k - 1]
+            left = pos_x - 1
+            right = pos_x + 1
+            eps_curr = np.inf  # = top_k[k - 1]
+            # Cache the two halves of sorted_cols[i] for this query into
+            # local pointer-like vars to give numba an unambiguous strided
+            # access pattern.
+            sorted_i = sorted_cols[i]
+            argsort_i = argsort_cols[i]
+            XT_j = XT[j]
 
-                while True:
-                    # Pick the side with smaller x-distance.
-                    if left < 0:
-                        if right >= n:
-                            break
-                        dx_next = sorted_cols[i, right] - xi
-                        next_sorted_idx = right
-                        right += 1
-                    elif right >= n:
-                        dx_next = xi - sorted_cols[i, left]
-                        next_sorted_idx = left
-                        left -= 1
-                    else:
-                        dl = xi - sorted_cols[i, left]
-                        dr = sorted_cols[i, right] - xi
-                        if dl <= dr:
-                            dx_next = dl
-                            next_sorted_idx = left
-                            left -= 1
-                        else:
-                            dx_next = dr
-                            next_sorted_idx = right
-                            right += 1
+            while True:
+                # Branchless side picking: read both sides, treat
+                # out-of-range as +inf so the min wins.
+                if left < 0:
+                    dl = np.inf
+                else:
+                    dl = xi - sorted_i[left]
+                if right >= n:
+                    dr = np.inf
+                else:
+                    dr = sorted_i[right] - xi
+                if dl <= dr:
+                    dx_next = dl
+                    next_sorted_idx = left
+                    left -= 1
+                else:
+                    dx_next = dr
+                    next_sorted_idx = right
+                    right += 1
 
-                    # No further point can shrink the k-th joint distance.
-                    if dx_next >= eps_curr:
-                        break
+                # No further point can shrink the k-th joint distance, and
+                # if both sides are out of range dx_next == inf > eps_curr
+                # naturally terminates the loop.
+                if dx_next >= eps_curr:
+                    break
 
-                    jj = argsort_cols[i, next_sorted_idx]
-                    dy = yi - XT[j, jj]
-                    if dy < 0.0:
-                        dy = -dy
-                    d = dx_next if dx_next > dy else dy
+                jj = argsort_i[next_sorted_idx]
+                dy = yi - XT_j[jj]
+                if dy < 0.0:
+                    dy = -dy
+                d = dx_next if dx_next > dy else dy
 
-                    if d < eps_curr:
-                        # Insertion-sort into length-k scratch.
-                        pos = k - 1
-                        while pos > 0 and top_k[pos - 1] > d:
-                            top_k[pos] = top_k[pos - 1]
-                            pos -= 1
-                        top_k[pos] = d
-                        eps_curr = top_k[k - 1]
+                if d < eps_curr:
+                    # Insertion-sort into length-k scratch.
+                    pos = k - 1
+                    while pos > 0 and top_k[pos - 1] > d:
+                        top_k[pos] = top_k[pos - 1]
+                        pos -= 1
+                    top_k[pos] = d
+                    eps_curr = top_k[k - 1]
 
-                eps = top_k[k - 1]
+            eps = top_k[k - 1]
 
-                # Marginal counts via bisect on the sorted columns.  Open
-                # interval (xi - eps, xi + eps), excluding self when eps > 0.
-                lo_x = _bisect_right(sorted_cols[i], xi - eps, n)
-                hi_x = _bisect_left(sorted_cols[i], xi + eps, n)
-                nx = hi_x - lo_x
+            # Marginal counts via bisect on the sorted columns.  Open
+            # interval (xi - eps, xi + eps), excluding self when eps > 0.
+            lo_x = _bisect_right(sorted_i, xi - eps, n)
+            hi_x = _bisect_left(sorted_i, xi + eps, n)
+            nx = hi_x - lo_x
 
-                lo_y = _bisect_right(sorted_cols[j], yi - eps, n)
-                hi_y = _bisect_left(sorted_cols[j], yi + eps, n)
-                ny = hi_y - lo_y
+            sorted_j = sorted_cols[j]
+            lo_y = _bisect_right(sorted_j, yi - eps, n)
+            hi_y = _bisect_left(sorted_j, yi + eps, n)
+            ny = hi_y - lo_y
 
-                if eps > 0.0:
-                    nx -= 1
-                    ny -= 1
+            if eps > 0.0:
+                nx -= 1
+                ny -= 1
 
-                # psi[nx] = digamma(nx + 1); same for ny.
-                sum_psi += psi[nx] + psi[ny]
+            sum_psi += psi[nx] + psi[ny]
 
-            mi = digamma_k + digamma_n - sum_psi / n
-            if mi < 0.0:
-                mi = 0.0
-            M[i, j] = mi
-            M[j, i] = mi
+        mi = digamma_k + digamma_n - sum_psi / n
+        if mi < 0.0:
+            mi = 0.0
+        M[i, j] = mi
+        M[j, i] = mi
 
 
 # -----------------------------------------------------------------------------
@@ -421,12 +429,22 @@ def mutual_information_matrix(
         psi = _digamma_int_table(n_samples)
         M = np.zeros((n_features, n_features), dtype=np.float64)
 
+        # Flat enumeration of upper-triangle pairs.  Driving the kernel with
+        # ``prange`` over this flat index gives the thread pool perfectly
+        # balanced chunks; the natural nested-loop ordering put O(p) work on
+        # the last thread and O(1) on the first, leaving most threads idle for
+        # the tail of the run.
+        pair_i_arr, pair_j_arr = np.triu_indices(n_features, k=1)
+        pair_i_arr = pair_i_arr.astype(np.int64, copy=False)
+        pair_j_arr = pair_j_arr.astype(np.int64, copy=False)
+
         if n_jobs is not None and n_jobs > 0:
             _orig = numba.get_num_threads()
             numba.set_num_threads(int(n_jobs))
             try:
                 _ksg_matrix_numba(
                     XT, sorted_cols, argsort_cols, ranks_cols,
+                    pair_i_arr, pair_j_arr,
                     int(n_neighbors), psi, M,
                 )
             finally:
@@ -434,6 +452,7 @@ def mutual_information_matrix(
         else:
             _ksg_matrix_numba(
                 XT, sorted_cols, argsort_cols, ranks_cols,
+                pair_i_arr, pair_j_arr,
                 int(n_neighbors), psi, M,
             )
 
