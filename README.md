@@ -10,7 +10,8 @@ Accelerated Maximally Filtered Clique Forest (MFCF) implementations for sparse p
 All modules live in `src/`:
 - `fast_fast_mfcf.py` — the MFCF builder (this is the ~100× speed-up).
 - `mfcf_logo.py` — the `MFCFLoGo` scikit-learn-compatible estimator.
-- `mutual_information.py` — KSG mutual-information matrix utilities.
+- `mutual_information.py` — mutual-information matrix utilities (KSG k-NN and fast histogram estimators).
+- `validate_mi_histogram.py` — validation + benchmark harness for the histogram MI estimator (Gaussian collapse, KSG agreement, `p >> n` timing).
 - `logo_inverse_covariance_estimation.ipynb` — worked-example notebook.
 
 ## Getting Started
@@ -76,27 +77,37 @@ covariance = est.get_covariance()
 
 ### Using Mutual Information Instead of Correlation
 Pearson correlation is only the right similarity when the variables are
-jointly Gaussian. Outside that regime (e.g., fat tails, regime shifts, non-linear co-movement) it can grossly under-state the dependence structure. The estimators accept `similarity="mutual_information"` to score MFCF gains with a pairwise mutual-information matrix instead. The matrix is built with the Kraskov–Stögbauer–Grassberger (KSG) k-nearest-neighbour estimator (Kraskov, Stögbauer, Grassberger, *Phys. Rev. E* 69, 066138, 2004).
+jointly Gaussian. Outside that regime (e.g., fat tails, regime shifts, non-linear co-movement) it can grossly under-state the dependence structure. The estimators accept `similarity="mutual_information"` to score MFCF gains with a pairwise mutual-information matrix instead.
+
+Two MI estimators are available via `mi_estimator`:
+
+- **`"ksg"`** (default) — the Kraskov–Stögbauer–Grassberger k-nearest-neighbour estimator (Kraskov, Stögbauer, Grassberger, *Phys. Rev. E* 69, 066138, 2004). Most informative, but it runs one neighbour search per column pair.
+- **`"histogram"`** — the equal-frequency (rank-binned) plug-in estimator with a Miller–Madow bias correction. It is the **fast** path: a single `O(n)` streaming pass per pair fills a tiny `B×B` joint-count table, so the whole matrix scales like `O(p² n)`, the same as a correlation matrix-multiply. End-to-end, an `MFCFLoGo.fit` with the histogram MI runs at ~1.1× the correlation fit (the clique-forest build, shared by both, dominates), versus ~25× for KSG. Prefer it when MI-build time matters or when `p >> n`, where the bin count is driven by `n` (the binding constraint) so cells stay well populated.
 
 ```python
 from mfcf_logo import MFCFLoGo
 
 est = MFCFLoGo(
     similarity="mutual_information",
-    mi_n_neighbors=3,         # KSG neighbours, robust around 3-6
-    mi_normalize="linfoot",   # sqrt(1 - exp(-2 I)) in [0, 1]
-    mi_n_jobs=-1,             # forwarded to the KSG numba/sklearn backend
+    mi_estimator="histogram",  # "ksg" (default) or "histogram" (fast)
+    mi_n_bins="auto",          # equal-frequency bins; scales with n
+    mi_n_neighbors=3,          # KSG neighbours (only used by mi_estimator="ksg")
+    mi_normalize="linfoot",    # sqrt(1 - exp(-2 I)) in [0, 1]
+    mi_n_jobs=-1,              # forwarded to the numba/sklearn backend
     mi_random_state=0,
     max_clique_size=4,
 )
 est.fit(X)
 ```
 
-The MI matrix uses Linfoot's informational correlation coefficient
+Both estimators use Linfoot's informational correlation coefficient
 `rho_I = sqrt(1 - exp(-2 I))` (Linfoot, *Inf. Control* 1(1), 1957), so
 entries live in `[0, 1]` and collapse to `|Pearson rho|` exactly under joint
 Gaussianity — the MI path is a strict generalisation of the correlation
-path.
+path, and correlation, KSG and histogram collapse to the *same* similarity
+matrix in the Gaussian limit. Run `python src/validate_mi_histogram.py` to
+reproduce the three-way collapse, the histogram-vs-KSG agreement, and the
+`p >> n` timing.
 
 - The LoGo aggregation step still uses the empirical (or user-supplied)
   covariance matrix, because clique-wise inversion requires an actual

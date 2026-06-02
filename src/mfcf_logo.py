@@ -16,7 +16,9 @@ _VALID_SIMILARITIES = ("correlation", "mutual_information")
 def _build_similarity(
     X: np.ndarray,
     similarity: str,
+    mi_estimator: str,
     mi_n_neighbors: int,
+    mi_n_bins,
     mi_normalize: str,
     mi_n_jobs: Optional[int],
     mi_random_state: Optional[int],
@@ -27,7 +29,9 @@ def _build_similarity(
     if similarity == "mutual_information":
         return _mi_matrix(
             X,
+            estimator=mi_estimator,
             n_neighbors=mi_n_neighbors,
+            n_bins=mi_n_bins,
             normalize=mi_normalize,
             n_jobs=mi_n_jobs,
             random_state=mi_random_state,
@@ -66,15 +70,30 @@ class MFCFLoGo(EmpiricalCovariance):
     similarity : {'correlation', 'mutual_information'}, default='correlation'
         Similarity used to score MFCF gains.  ``'correlation'`` uses Pearson
         correlation (assumes joint Gaussianity).  ``'mutual_information'``
-        builds the pairwise MI matrix via the Kraskov-Stögbauer-Grassberger
-        non-parametric k-NN estimator.
+        builds the pairwise MI matrix with the estimator selected by
+        ``mi_estimator``.
+
+    mi_estimator : {'ksg', 'histogram'}, default='ksg'
+        MI estimator used when ``similarity='mutual_information'``.  ``'ksg'``
+        is the Kraskov-Stögbauer-Grassberger k-NN estimator (most informative,
+        one neighbour search per pair).  ``'histogram'`` is the equal-frequency
+        plug-in estimator with a Miller-Madow correction — much faster
+        (correlation-like ``O(p^2 n)`` scaling) and the preferred choice when
+        ``p >> n`` or when MI-matrix build time matters.  Both collapse to
+        ``|Pearson rho|`` under joint Gaussianity.
 
     mi_n_neighbors : int, default=3
         Number of neighbours for the KSG estimator.  Only used when
-        ``similarity='mutual_information'``.
+        ``similarity='mutual_information'`` and ``mi_estimator='ksg'``.
+
+    mi_n_bins : int or 'auto', default='auto'
+        Number of equal-frequency bins for the histogram estimator.  ``'auto'``
+        scales the bin count with the sample size (the binding constraint when
+        ``p >> n``).  Only used when ``similarity='mutual_information'`` and
+        ``mi_estimator='histogram'``.
 
     mi_normalize : {'linfoot', 'none'}, default='linfoot'
-        Normalisation applied to the raw KSG MI estimates.  Only used when
+        Normalisation applied to the raw MI estimates.  Only used when
         ``similarity='mutual_information'``.
 
     mi_n_jobs : int or None, default=None
@@ -121,7 +140,9 @@ class MFCFLoGo(EmpiricalCovariance):
         coordination_number: int = np.inf,
         gain_function_type: str = "sumsquares",
         similarity: str = "correlation",
+        mi_estimator: str = "ksg",
         mi_n_neighbors: int = 3,
+        mi_n_bins="auto",
         mi_normalize: str = "linfoot",
         mi_n_jobs: Optional[int] = None,
         mi_random_state: Optional[int] = None,
@@ -134,7 +155,9 @@ class MFCFLoGo(EmpiricalCovariance):
         self.coordination_number = coordination_number
         self.gain_function_type = gain_function_type
         self.similarity = similarity
+        self.mi_estimator = mi_estimator
         self.mi_n_neighbors = mi_n_neighbors
+        self.mi_n_bins = mi_n_bins
         self.mi_normalize = mi_normalize
         self.mi_n_jobs = mi_n_jobs
         self.mi_random_state = mi_random_state
@@ -213,7 +236,9 @@ class MFCFLoGo(EmpiricalCovariance):
                 else _build_similarity(
                     X,
                     self.similarity,
+                    self.mi_estimator,
                     self.mi_n_neighbors,
+                    self.mi_n_bins,
                     self.mi_normalize,
                     self.mi_n_jobs,
                     self.mi_random_state,
