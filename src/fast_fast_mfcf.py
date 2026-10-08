@@ -508,7 +508,9 @@ class MFCF:
         C1[r, c] = 0
         sums = C1.sum(axis=0)
         cand = np.argsort(-sums, kind="stable")
-        return frozenset(cand[: (self._min_clique_size - 1)])
+        # seed with at least the strongest vertex, so the output does not
+        # depend on the order of the variables
+        return frozenset(int(x) for x in cand[: max(1, self._min_clique_size - 1)])
 
     # -------------------------------------------------------------------------
     # Main algorithm loop
@@ -545,7 +547,8 @@ class MFCF:
             new_clique = self._add_new_clique(parent_clique, sep, v)
 
             self._remaining_nodes_count -= 1
-            self._check_proposed_separator(sep_wrapper, cliques_before)
+            if sep:  # a new component (empty separator) records no separator
+                self._check_proposed_separator(sep_wrapper, cliques_before)
 
             if self._remaining_nodes_count == 0:
                 break
@@ -577,7 +580,7 @@ class MFCF:
         # If drop_sep is enabled, disable candidates with a seen/used separator.
         sep = sep_wrapper.separator
         # multiplicity constraint
-        if self._separators_count[sep] > self._coordination_number:
+        if self._separators_count[sep] >= self._coordination_number:
             return True
         if np.isnan(gain):
             return True
@@ -766,6 +769,8 @@ class MFCF:
         """
         if sep in self._pq_separators:
             return
+        if sep and self._separators_count[sep] >= self._coordination_number:
+            return  # a separator at the coordination cap cannot host new vertices
         gain, v, ranked_sep = self._gf(self._outstanding_nodes_mask, sep)
         self._push_to_pq(gain, v, ranked_sep)
 

@@ -1,0 +1,26 @@
+name: MFCF validation
+
+on:
+  pull_request:
+  push:
+    branches: [main, mutual_info, dev]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+      - run: python -m pip install numpy networkx pytest
+      - name: Test available MFCF implementations
+        run: |
+          found=0
+          for dir in src src_speed; do
+            if [ -f "$dir/test_mfcf_validation.py" ]; then
+              found=1
+              PYTHONPATH="$dir" python -m pytest -q "$dir/test_mfcf_validation.py"
+            fi
+          done
+          test "$found" -eq 1
