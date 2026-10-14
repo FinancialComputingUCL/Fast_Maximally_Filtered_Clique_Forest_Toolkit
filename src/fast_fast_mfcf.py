@@ -201,6 +201,43 @@ def _check_nonnegative(W: np.ndarray) -> None:
         )
 
 
+def _kendall_tau_b(X: np.ndarray, block: int = 256) -> np.ndarray:
+    """Kendall's tau-b for all pairs of columns, as a normalised Gram matrix of
+    pairwise sign differences (O(n^2 p^2) operations, O(block n p) memory)."""
+    n, p = X.shape
+    G = np.zeros((p, p))
+    for k0 in range(0, n - 1, block):
+        rows = range(k0, min(k0 + block, n - 1))
+        D = np.concatenate([np.sign(X[k + 1:] - X[k]) for k in rows])
+        G += D.T @ D
+    d = np.sqrt(np.diag(G))
+    if np.any(d == 0):
+        raise ValueError("X has constant columns")
+    return G / np.outer(d, d)
+
+
+def _rank_correlation(X: np.ndarray, method: str) -> np.ndarray:
+    """Gaussian-copula correlation from Spearman's rho or Kendall's tau:
+    ``2 sin(pi rho_s / 6)`` and ``sin(pi tau / 2)``, projected onto the
+    positive definite correlation matrices when the mapping leaves them."""
+    if method == "spearman":
+        Rk = stats.rankdata(X, axis=0)
+        R = np.corrcoef(Rk, rowvar=False)
+        R = 2 * np.sin(np.pi * R / 6)
+    else:
+        R = np.sin(np.pi * _kendall_tau_b(X) / 2)
+    R = (R + R.T) / 2
+    np.fill_diagonal(R, 1.0)
+    w, V = LA.eigh(R)
+    if w.min() < 1e-8:
+        R = (V * np.maximum(w, 1e-8)) @ V.T
+        d = 1 / np.sqrt(np.diag(R))
+        R = R * np.outer(d, d)
+        R = (R + R.T) / 2
+        np.fill_diagonal(R, 1.0)
+    return R
+
+
 def _effective_sample_size(Xc: np.ndarray) -> float:
     """Effective number of observations for sample correlations of
     autocorrelated series (Bartlett): ``n / mean_{i<j} (1 + phi_i phi_j) /
@@ -861,6 +898,7 @@ class MFCF:
         assume_centered: bool = False,
         shrinkage: float = 0.0,
         n_effective=None,
+        correlation: str = "pearson",
     ) -> "MFCF":
         """
         Build the clique forest and a precision estimate directly from data.
@@ -881,6 +919,15 @@ class MFCF:
             it from the lag-1 autocorrelations ``phi`` of the series with
             Bartlett's inflation factor for sample correlations,
             ``n / mean_{i<j} (1 + phi_i phi_j) / (1 - phi_i phi_j)``.
+        correlation : {"pearson", "spearman", "kendall"}, default="pearson"
+            Correlation used for the structure and the precision. The rank
+            options estimate the correlation of the Gaussian copula,
+            ``2 sin(pi rho_s / 6)`` (Spearman) or ``sin(pi tau / 2)``
+            (Kendall), projected onto the positive definite matrices if
+            needed; they are invariant to monotone transformations of the
+            variables and robust to heavy tails and outliers. The statistical
+            acceptance rules then hold approximately. "kendall" costs
+            O(n^2 p^2) operations.
 
         Returns
         -------
@@ -914,9 +961,14 @@ class MFCF:
         sd = np.sqrt(np.diag(cov))
         if np.any(sd <= 0):
             raise ValueError("X has constant columns")
-        R = cov / np.outer(sd, sd)
-        R = (R + R.T) / 2
-        np.fill_diagonal(R, 1.0)
+        if correlation == "pearson":
+            R = cov / np.outer(sd, sd)
+            R = (R + R.T) / 2
+            np.fill_diagonal(R, 1.0)
+        elif correlation in ("spearman", "kendall"):
+            R = _rank_correlation(X, correlation)
+        else:
+            raise ValueError("correlation must be 'pearson', 'spearman' or 'kendall'")
 
         if n_effective is None:
             n_eff = float(n)

@@ -275,7 +275,7 @@ def test_sklearn_estimator_checks():
     pytest.importorskip("optuna")
     from sklearn.utils.estimator_checks import (check_estimators_pickle, check_fit_idempotent,
                                                 check_get_params_invariance, check_dont_overwrite_parameters,
-                                                check_fit2d_1sample, check_n_features_in)
+                                                check_n_features_in)
     from mfcf_logo import MFCFLoGo
     est = MFCFLoGo(max_clique_size=3, shrinkage=0.1)
     for check in (check_get_params_invariance, check_dont_overwrite_parameters, check_fit_idempotent,
@@ -372,3 +372,85 @@ def test_component_threshold_on_gain_scale(tau):
         C = np.array([[1.0, r], [r, 1.0]])
         cl, _, _, _ = MFCF(max_clique_size=2, threshold=tau).run(C)
         assert (len(cl) == 1) == connected
+
+
+# ------------------------------------------------------ rank correlations
+from fast_fast_mfcf import _kendall_tau_b  # noqa: E402
+
+
+def test_kendall_tau_b_matches_scipy_with_ties():
+    rng = np.random.default_rng(3)
+    X = np.round(rng.standard_normal((57, 5)), 1)              # many ties
+    T = _kendall_tau_b(X, block=7)
+    for i in range(5):
+        for j in range(5):
+            ref = 1.0 if i == j else stats.kendalltau(X[:, i], X[:, j]).statistic
+            assert T[i, j] == pytest.approx(ref, abs=1e-12)
+
+
+def test_spearman_mapping():
+    rng = np.random.default_rng(4)
+    X = rng.standard_normal((200, 4)) @ rng.standard_normal((4, 4))
+    R = MFCF(max_clique_size=3).fit(X, correlation="spearman").correlation_
+    rs = stats.spearmanr(X).statistic
+    np.testing.assert_allclose(R, 2 * np.sin(np.pi * rs / 6), atol=1e-12)
+
+
+@pytest.mark.parametrize("method", ["spearman", "kendall"])
+def test_rank_correlation_invariant_to_monotone_transforms(method):
+    rng = np.random.default_rng(5)
+    X = rng.standard_normal((150, 12)) @ rng.standard_normal((12, 12))
+    Y = np.column_stack([np.exp(X[:, 0]), X[:, 1] ** 3, -1 / (1 + np.exp(X[:, 2])), X[:, 3:] * 7 + 2])
+    a = MFCF(max_clique_size=4, acceptance="ftest").fit(X, correlation=method)
+    b = MFCF(max_clique_size=4, acceptance="ftest").fit(Y, correlation=method)
+    np.testing.assert_allclose(a.correlation_, b.correlation_, atol=1e-12)
+    assert [sorted(q) for q in a.cliques_] == [sorted(q) for q in b.cliques_]
+
+
+@pytest.mark.parametrize("method", ["spearman", "kendall"])
+def test_rank_correlation_consistent_for_gaussian_data(method):
+    rng = np.random.default_rng(6)
+    S, _ = _chordal_model(p=8, seed=1)
+    X = rng.multivariate_normal(np.zeros(8), S, size=4000)
+    d = 1 / np.sqrt(np.diag(S))
+    R = MFCF().fit(X, correlation=method).correlation_
+    assert np.max(np.abs(R - S * np.outer(d, d))) < 0.05
+
+
+@pytest.mark.parametrize("method", ["spearman", "kendall"])
+def test_rank_correlation_recovers_tree_under_heavy_tails(method):
+    """Chow-Liu recovery of a tree from a Gaussian copula with Cauchy-like
+    margins and gross outliers, where Pearson correlations are unreliable."""
+    rng = np.random.default_rng(7)
+    p, n = 15, 400
+    parent = [None] + [int(rng.integers(v)) for v in range(1, p)]
+    Z = np.zeros((n, p))
+    Z[:, 0] = rng.standard_normal(n)
+    for v in range(1, p):
+        Z[:, v] = 0.8 * Z[:, parent[v]] + 0.6 * rng.standard_normal(n)
+    X = np.tan(0.49 * np.pi * np.tanh(Z))                     # heavy-tailed margins
+    X[rng.integers(n, size=5), rng.integers(p, size=5)] = 1e6  # gross outliers
+    m = MFCF(max_clique_size=2).fit(X, correlation=method)
+    E = {frozenset(q) for q in m.cliques_}
+    assert E == {frozenset((v, parent[v])) for v in range(1, p)}
+
+
+@pytest.mark.parametrize("method", ["spearman", "kendall"])
+def test_rank_correlation_positive_definite_when_p_exceeds_n(method):
+    rng = np.random.default_rng(8)
+    X = rng.standard_normal((10, 30))
+    m = MFCF(max_clique_size=4, threshold=0.05).fit(X, correlation=method)
+    R = m.correlation_
+    assert np.allclose(np.diag(R), 1) and np.allclose(R, R.T)
+    assert np.linalg.eigvalsh(R).min() > 0
+    assert m.precision_ is not None and np.all(np.isfinite(m.precision_))
+
+
+def test_rank_correlation_option_validation_and_estimators():
+    X = np.random.default_rng(9).standard_normal((80, 6))
+    with pytest.raises(ValueError):
+        MFCF().fit(X, correlation="distance")
+    from mfcf_logo import MFCFLoGo
+    m = MFCFLoGo(max_clique_size=3, correlation="kendall").fit(X)
+    assert m.get_params()["correlation"] == "kendall"
+    assert np.all(np.isfinite(m.precision_))

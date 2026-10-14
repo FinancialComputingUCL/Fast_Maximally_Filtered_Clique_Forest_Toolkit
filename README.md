@@ -128,6 +128,14 @@ m.n_effective_                            # observations used by the test
   Bartlett's correction for sample correlations,
   `n / mean_{i<j} (1 + phi_i phi_j) / (1 - phi_i phi_j)` with `phi` the lag-1
   autocorrelations; a number can also be given.
+- `correlation="spearman"` or `"kendall"` replaces the Pearson correlation
+  by the Gaussian-copula correlation estimated from ranks
+  (`2 sin(pi rho_s / 6)` or `sin(pi tau / 2)`, projected onto the positive
+  definite matrices if needed). The structure is then invariant to monotone
+  transformations of the variables and robust to heavy tails and outliers
+  (e.g. daily returns); the statistical tests hold approximately. Spearman
+  costs about the same as Pearson; Kendall costs O(n^2 p^2) (about 3 s for
+  n = 2000, p = 200).
 - Assumptions: approximately stationary series over the sample (use returns,
   not prices). Data preparation (missing values, windows) is left to the user.
 - `fit(X)` works with the `"loglik"` gain (default) or `"sumsquares"` (the
@@ -135,8 +143,8 @@ m.n_effective_                            # observations used by the test
   matrices use `run(C)`.
 
 The LoGo estimators (`MFCFLoGo`, `MFCFLoGoCV`, `MFCFLoGoCVAll`) are built on
-`fit(X)` and accept the same options (`acceptance`, `alpha`, `shrinkage`,
-`n_effective`); `MFCFLoGoCVAll` can tune `alpha`
+`fit(X)` and accept the same options (`acceptance`, `alpha`, `new_component`,
+`shrinkage`, `n_effective`, `correlation`); `MFCFLoGoCVAll` can tune `alpha`
 (`tunable_params=("alpha", ...)`). Their `precision_` and `covariance_` are on
 the covariance scale of the data (earlier versions returned the precision of
 the correlation matrix).

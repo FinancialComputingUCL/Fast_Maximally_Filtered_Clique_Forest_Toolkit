@@ -1,6 +1,6 @@
 import warnings
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Union, Dict, Any, Set
+from typing import Iterable, List, Optional, Union, Dict, Any
 
 import numpy as np
 import numpy.linalg as LA
@@ -57,6 +57,10 @@ class MFCFLoGo(EmpiricalCovariance):
         Number of observations for the statistical acceptance rules; 'auto'
         corrects for autocorrelation of time series (see `MFCF.fit`).
 
+    correlation : {'pearson', 'spearman', 'kendall'}, default='pearson'
+        Correlation used for the structure and the precision; the rank options
+        estimate the Gaussian-copula correlation (see `MFCF.fit`).
+
     assume_centered : bool, default=False
         If True, data are not centered before computation.
         Useful when working with data whose mean is almost, but not exactly
@@ -97,6 +101,7 @@ class MFCFLoGo(EmpiricalCovariance):
         new_component: str = "strongest",
         shrinkage: float = 0.0,
         n_effective=None,
+        correlation: str = "pearson",
         assume_centered: bool = False,
     ):
         super().__init__(assume_centered=assume_centered)
@@ -110,6 +115,7 @@ class MFCFLoGo(EmpiricalCovariance):
         self.new_component = new_component
         self.shrinkage = shrinkage
         self.n_effective = n_effective
+        self.correlation = correlation
 
     def fit(self, X: np.ndarray, y=None) -> "MFCFLoGo":
         """Fit the estimator from data X.
@@ -154,7 +160,8 @@ class MFCFLoGo(EmpiricalCovariance):
         # structure from the sample correlation; precision on the covariance
         # scale of X (LoGo of the correlation blocks rescaled by the variances)
         builder.fit(X, assume_centered=self.assume_centered,
-                    shrinkage=self.shrinkage, n_effective=self.n_effective)
+                    shrinkage=self.shrinkage, n_effective=self.n_effective,
+                    correlation=self.correlation)
 
         self.cliques_ = builder.cliques_
         self.separators_count_ = builder.separators_
@@ -331,6 +338,7 @@ class MFCFLoGoCV(EmpiricalCovariance):
         new_component: str = "strongest",
         shrinkage: float = 0.0,
         n_effective=None,
+        correlation: str = "pearson",
         assume_centered: bool = False,
         # scoring / robustness
         error_score: Union[str, float] = np.nan,
@@ -350,6 +358,7 @@ class MFCFLoGoCV(EmpiricalCovariance):
         self.new_component = new_component
         self.shrinkage = shrinkage
         self.n_effective = n_effective
+        self.correlation = correlation
         self.assume_centered = assume_centered
 
         self.error_score = error_score
@@ -432,6 +441,7 @@ class MFCFLoGoCV(EmpiricalCovariance):
                         new_component=self.new_component,
                         shrinkage=self.shrinkage,
                         n_effective=self.n_effective,
+                        correlation=self.correlation,
                         assume_centered=self.assume_centered,
                     )
                     base.fit(X_tr)
@@ -497,6 +507,7 @@ class MFCFLoGoCV(EmpiricalCovariance):
             new_component=self.new_component,
             shrinkage=self.shrinkage,
             n_effective=self.n_effective,
+            correlation=self.correlation,
             assume_centered=self.assume_centered,
         )
         final.fit(X)
@@ -671,6 +682,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         new_component: str = "strongest",
         shrinkage: float = 0.0,
         n_effective=None,
+        correlation: str = "pearson",
         assume_centered: bool = False,
         # scoring / robustness
         error_score: Union[str, float] = np.nan,
@@ -693,6 +705,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         self.new_component = new_component
         self.shrinkage = shrinkage
         self.n_effective = n_effective
+        self.correlation = correlation
         self.assume_centered = assume_centered
 
         self.error_score = error_score
@@ -709,6 +722,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             new_component=self.new_component,
             shrinkage=self.shrinkage,
             n_effective=self.n_effective,
+            correlation=self.correlation,
         )
         if not self.tunable_params:
             return params
@@ -781,6 +795,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             new_component=self.new_component,
             shrinkage=self.shrinkage,
             n_effective=self.n_effective,
+            correlation=self.correlation,
         )
         final_params.update(best_params)
         # print(best_params, flush=True)
