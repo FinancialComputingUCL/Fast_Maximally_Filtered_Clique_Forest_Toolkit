@@ -4,7 +4,6 @@ from typing import Iterable, List, Optional, Union, Dict, Any
 
 import numpy as np
 import numpy.linalg as LA
-import optuna
 from sklearn.covariance import EmpiricalCovariance
 from sklearn.covariance import empirical_covariance, log_likelihood
 from sklearn.model_selection import KFold, cross_val_score
@@ -34,7 +33,9 @@ class MFCFLoGo(EmpiricalCovariance):
     coordination_number : float, default=np.inf
         Maximum allowed uses of a separator (multiplicity cap).
 
-    gain_function_type : {'loglik', 'sumsquares', 'sum'}, default='loglik'
+    gain_function_type : {'loglik', 'sumsquares', 'sum'}, default=None
+        None means 'loglik' (with a FutureWarning in this release: the default
+        was 'sumsquares' until version 2026.10).
         Gain function type to use in MFCF construction. The function is used to
         determine which vertex to add next to maximize the overall gain in the
         graph.
@@ -95,7 +96,7 @@ class MFCFLoGo(EmpiricalCovariance):
         min_clique_size: int = 1,
         max_clique_size: int = 4,
         coordination_number: int = np.inf,
-        gain_function_type: str = "loglik",
+        gain_function_type: Optional[str] = None,
         acceptance: str = "threshold",
         alpha: float = 0.05,
         new_component: str = "strongest",
@@ -251,7 +252,9 @@ class MFCFLoGoCV(EmpiricalCovariance):
     coordination_number : float, default=np.inf
         Maximum allowed uses of a separator (multiplicity cap).
 
-    gain_function_type : {'loglik', 'sumsquares', 'sum'}, default='loglik'
+    gain_function_type : {'loglik', 'sumsquares', 'sum'}, default=None
+        None means 'loglik' (with a FutureWarning in this release: the default
+        was 'sumsquares' until version 2026.10).
         Gain function type to use in MFCF construction. The function is used to
         determine which vertext to add next to maximize the overall gain in the
         graph.
@@ -332,7 +335,7 @@ class MFCFLoGoCV(EmpiricalCovariance):
         threshold: float = 0.0,
         min_clique_size: int = 1,
         coordination_number: int = np.inf,
-        gain_function_type: str = "loglik",
+        gain_function_type: Optional[str] = None,
         acceptance: str = "threshold",
         alpha: float = 0.05,
         new_component: str = "strongest",
@@ -591,7 +594,9 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
     coordination_number : float, default=np.inf
         Maximum allowed uses of a separator (multiplicity cap).
 
-    gain_function_type : {'loglik', 'sumsquares', 'sum'}, default='loglik'
+    gain_function_type : {'loglik', 'sumsquares', 'sum'}, default=None
+        None means 'loglik' (with a FutureWarning in this release: the default
+        was 'sumsquares' until version 2026.10).
         Gain function type to use in MFCF construction. The function is used to
         determine which vertext to add next to maximize the overall gain in the
         graph.
@@ -676,7 +681,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         min_clique_size: int = 1,
         max_clique_size: int = 4,
         coordination_number: int = np.inf,
-        gain_function_type: str = "loglik",
+        gain_function_type: Optional[str] = None,
         acceptance: str = "threshold",
         alpha: float = 0.05,
         new_component: str = "strongest",
@@ -710,7 +715,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
 
         self.error_score = error_score
 
-    def _process_params(self, trial: optuna.Trial, n_features: int) -> Dict[str, Any]:
+    def _process_params(self, trial, n_features: int) -> Dict[str, Any]:
         params = dict(
             threshold=self.threshold,
             min_clique_size=self.min_clique_size,
@@ -762,7 +767,12 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         return params
 
     def _cross_validate(self, X: np.ndarray):
-        def objective(trial: optuna.Trial):
+        try:
+            import optuna
+        except ImportError as e:
+            raise ImportError("MFCFLoGoCVAll requires optuna: pip install optuna") from e
+
+        def objective(trial):
             n_features = X.shape[1]
             params = self._process_params(trial, n_features)
             # Log sampled parameters before evaluating the trial

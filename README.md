@@ -9,14 +9,21 @@ Accelerated Maximally Filtered Clique Forest (MFCF) implementations for sparse p
 
 ## Getting Started
 - Python 3.9+ recommended.
-- Clone the repository and install dependencies:
+- Clone the repository and install the package (numpy and scipy only), with
+  optional extras: `sklearn` for the LoGo estimators, `cv` for
+  `MFCFLoGoCVAll` (adds optuna), `dbht` for `mfcf_dbht` (riskfolio-lib),
+  `test` for the test suite:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -U pip
-pip install -r requirements.txt
+pip install ".[sklearn]"        # or ".[cv,dbht]", ".[test]"
+python -m pytest -q             # from the repository root, with ".[test]"
 ```
+
+  `pip install -r requirements.txt` still installs every optional dependency.
+  Version history: [CHANGELOG.md](CHANGELOG.md).
 
 - Optional: enable logging for verbose traces:
 

@@ -41,6 +41,7 @@ Notes
 import heapq
 import itertools
 import logging
+import warnings
 from collections import Counter
 from dataclasses import dataclass
 from typing import FrozenSet, Iterable, List, Optional, Tuple
@@ -199,6 +200,16 @@ def _check_nonnegative(W: np.ndarray) -> None:
             "transform the weights (e.g. np.abs(W)) or use 'sumsquares', which "
             "sums the squared weights"
         )
+
+
+__version__ = "2026.10.0"
+
+_DEFAULT_CHANGE_MSG = (
+    "The default gain_function_type changed from 'sumsquares' to 'loglik' "
+    "(exact Gaussian log-likelihood gain) in version 2026.10. Pass "
+    "gain_function_type explicitly to silence this warning; for the results "
+    "of earlier versions use gain_function_type='sumsquares', "
+    "new_component='first'.")
 
 
 def _kendall_tau_b(X: np.ndarray, block: int = 256, gram_max_n: int = 2000) -> np.ndarray:
@@ -778,7 +789,9 @@ class MFCF:
     gain_function_type : {"loglik", "sumsquares", "sum"}, default="loglik"
         "loglik": exact Gaussian log-likelihood gain, for a covariance or
         correlation matrix `C`. "sumsquares" / "sum": sum of squared weights /
-        of weights, for any weight matrix `C`.
+        of weights, for any weight matrix `C`. Until version 2026.10 the
+        default was "sumsquares"; leaving it unset issues a FutureWarning
+        for this release.
     acceptance : {"threshold", "ftest", "bic"}, default="threshold"
         Rule for accepting each greedy attachment step. "threshold" uses
         `threshold` (squared partial correlation for "loglik", (squared) weight
@@ -822,12 +835,15 @@ class MFCF:
         min_clique_size: int = 1,
         max_clique_size: int = 4,
         coordination_number: int = np.inf,
-        gain_function_type: str = "loglik",
+        gain_function_type: Optional[str] = None,
         acceptance: str = "threshold",
         alpha: float = 0.05,
         n_samples: Optional[int] = None,
         new_component: str = "strongest",
     ) -> None:
+        if gain_function_type is None:
+            warnings.warn(_DEFAULT_CHANGE_MSG, FutureWarning, stacklevel=2)
+            gain_function_type = "loglik"
         _check_options(gain_function_type, acceptance, alpha, n_samples, require_n=False)
         if new_component not in ("strongest", "first"):
             raise ValueError("new_component must be 'strongest' or 'first'")

@@ -40,7 +40,7 @@ def mfcf_dbhts(
     min_clique_size: int = 1,
     max_clique_size: int = 4,
     coordination_number: int = np.inf,
-    gain_function_type: str = "loglik",
+    gain_function_type: str = "sumsquares",
     acceptance: str = "threshold",
     alpha: float = 0.05,
     new_component: str = "strongest",

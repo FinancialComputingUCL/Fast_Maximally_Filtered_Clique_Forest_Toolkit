@@ -272,3 +272,14 @@ def test_new_component_option():
     b = MFCF(max_clique_size=4, threshold=0.3, new_component="strongest").run(C)
     for out in (a, b):
         _valid(out[0], C.shape[0], 4)
+
+
+def test_future_warning_for_unset_gain():
+    import warnings
+    with pytest.warns(FutureWarning, match="sumsquares"):
+        m = MFCF()
+    assert m._gf_type == "loglik"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        MFCF(gain_function_type="loglik")
+        MFCF(gain_function_type="sumsquares", new_component="first")

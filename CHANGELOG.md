@@ -1,0 +1,52 @@
+# Changelog
+
+## 2026.10.0
+
+### Changed (results may differ from earlier versions)
+- **Default gain is the exact Gaussian log-likelihood gain**
+  (`gain_function_type="loglik"`, `-1/2 log(1 - R^2_{v|S})`), replacing the
+  sum of squared correlations (`"sumsquares"`). Leaving the option unset
+  issues a `FutureWarning` in this release. `mfcf_dbht` keeps `"sumsquares"`,
+  since its input is a similarity matrix rather than a covariance.
+- **New components start from the strongest vertex**
+  (`new_component="strongest"`), so the clique forest no longer depends on the
+  order of the variables. `new_component="first"` restores the former
+  lowest-index rule.
+- `MFCFLoGo`, `MFCFLoGoCV` and `MFCFLoGoCVAll` return `precision_` and
+  `covariance_` on the covariance scale of the data (formerly the precision
+  of the correlation matrix).
+
+The results of earlier versions are reproduced exactly with
+`gain_function_type="sumsquares", new_component="first"` (verified on 300
+random configurations).
+
+### Added
+- Statistical acceptance of each attachment: partial F-test
+  (`acceptance="ftest"`, level `alpha`) and BIC (`acceptance="bic"`), as
+  alternatives to the fixed `threshold`.
+- `"sum"` gain for non-negative weight matrices; weight matrices with negative
+  entries are rejected for this gain.
+- `MFCF.fit(X)`: builds the clique forest and the decomposable maximum
+  likelihood precision directly from data, with optional block shrinkage,
+  effective sample size for autocorrelated series (`n_effective="auto"`), and
+  rank-based Gaussian-copula correlations (`correlation="spearman"` or
+  `"kendall"`).
+- `alpha` can be tuned by `MFCFLoGoCVAll`.
+- Installable package (`pyproject.toml`; core needs only numpy and scipy,
+  optuna is imported only by `MFCFLoGoCVAll`); input validation with
+  informative errors; version number;
+  scaling benchmark (`benchmarks/`); about 2150 tests (validation against the
+  reference implementation, properties, robustness, scikit-learn checks).
+
+### Fixed
+- Crash when `min_clique_size` exceeds the number of variables.
+- `MFCFLoGoCVAll` ignored `cv` and the gain setting.
+- `mfcf_dbht`: missing `squareform` import, asymmetric distance passed to
+  `optimal_leaf_ordering`; a disconnected backbone now raises an error.
+- `run()` returns `J=None` instead of inverting singular clique blocks.
+- README examples and the final cell of the LoGo notebook.
+
+### Performance
+- The log-likelihood gain is cached per separator (bounded memory) and uses
+  closed-form facet updates; it runs at a cost comparable to the
+  sum-of-squares gain (p = 1600, K = 8: about 4 s).
