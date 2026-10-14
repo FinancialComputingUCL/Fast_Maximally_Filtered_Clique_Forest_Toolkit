@@ -137,7 +137,7 @@ def test_sklearn_estimators():
 
 
 # --------------------------------------------------------------------- DBHT
-@pytest.mark.parametrize("gain", ["loglik", "sumsquares"])
+@pytest.mark.parametrize("gain", ["loglik", "sumsquares", "sum", None])
 def test_dbht(gain):
     pytest.importorskip("riskfolio")
     from mfcf_dbht import mfcf_dbhts
@@ -148,7 +148,10 @@ def test_dbht(gain):
     S = np.corrcoef(X, rowvar=False)
     D = np.sqrt(np.clip(2 * (1 - S), 0, None))
     np.fill_diagonal(D, 0.0)
-    T8, Rpm, Adjv, Dpm, Mv, Z = mfcf_dbhts(D, S, max_clique_size=4, gain_function_type=gain)
+    if gain in ("sum", None):                                  # non-negative similarity
+        S = (1 + S) / 2
+    kw = {} if gain is None else dict(gain_function_type=gain)    # default: "sum"
+    T8, Rpm, Adjv, Dpm, Mv, Z = mfcf_dbhts(D, S, max_clique_size=4, **kw)
     labels = fcluster(Z, 4, "maxclust")
     # each planted group falls in a single cluster
     assert all(len(set(labels[groups == k])) == 1 for k in range(4))

@@ -179,10 +179,10 @@ def _check_options(gf_type, acceptance, alpha, n_samples, require_n: bool = True
             raise ValueError("alpha must be in (0, 1)")
 
 
-def _check_covariance(C: np.ndarray) -> None:
-    msg = ("gain_function_type='loglik' requires a covariance or correlation matrix "
-           "(symmetric, positive semi-definite, positive diagonal); for a general "
-           "weight matrix use gain_function_type='sumsquares' or 'sum'")
+def _check_covariance(C: np.ndarray, gain: str = "loglik") -> None:
+    msg = (f"gain_function_type='{gain}' requires a covariance or correlation matrix "
+           "(symmetric, positive semi-definite, positive diagonal); for a "
+           "non-negative weight matrix use gain_function_type='sum'")
     if C.ndim != 2 or C.shape[0] != C.shape[1] or not np.allclose(C, C.T, atol=1e-10):
         raise ValueError(msg)
     if np.any(np.diag(C) <= 0):
@@ -197,8 +197,8 @@ def _check_nonnegative(W: np.ndarray) -> None:
     if np.any(off < 0):
         raise ValueError(
             "gain_function_type='sum' requires a non-negative weight matrix; "
-            "transform the weights (e.g. np.abs(W)) or use 'sumsquares', which "
-            "sums the squared weights"
+            "transform the weights (e.g. np.abs(W)); for a covariance or "
+            "correlation matrix use 'loglik' or 'sumsquares'"
         )
 
 
@@ -354,6 +354,7 @@ class Gains:
         # vertex used to start a new component (default: lowest index)
         self._root = root_chooser or (lambda mask: int(np.argmax(mask)))
         if gf_type == "sumsquares":
+            _check_covariance(np.asarray(C, dtype=float), "sumsquares")
             self._W = np.square(C)
         elif gf_type == "sum":
             self._W = np.asarray(C, dtype=float)
@@ -788,10 +789,11 @@ class MFCF:
         recorded/used). Use `np.inf` to disable.
     gain_function_type : {"loglik", "sumsquares", "sum"}, default="loglik"
         "loglik": exact Gaussian log-likelihood gain, for a covariance or
-        correlation matrix `C`. "sumsquares" / "sum": sum of squared weights /
-        of weights, for any weight matrix `C`. Until version 2026.10 the
-        default was "sumsquares"; leaving it unset issues a FutureWarning
-        for this release.
+        correlation matrix `C`. "sumsquares": sum of squared correlations, the
+        original approximation, for a covariance or correlation matrix `C`.
+        "sum": sum of weights, for a non-negative weight / similarity matrix
+        `C`. Until version 2026.10 the default was "sumsquares"; leaving it
+        unset issues a FutureWarning for this release.
     acceptance : {"threshold", "ftest", "bic"}, default="threshold"
         Rule for accepting each greedy attachment step. "threshold" uses
         `threshold` (squared partial correlation for "loglik", (squared) weight
@@ -808,6 +810,18 @@ class MFCF:
         squared similarities to the other outstanding vertices (independent
         of the labelling of the variables); "first" takes the lowest index,
         as in versions before 2026.10.
+    n_starts : int, default=1
+        Number of starting cliques, at most `max_clique_size`. The expansion
+        is greedy and its result depends on where it starts: with
+        ``n_starts=k`` it is run from the default seed and from k - 1 further
+        seeds spread over the network (strong vertices weakly related to the
+        seeds already chosen), and the clique forest with the largest
+        objective is kept (the
+        decomposable Gaussian log-likelihood for "loglik", the total edge
+        weight, squared for "sumsquares", otherwise). Costs k runs. Most
+        useful with a statistical acceptance rule; with ``threshold=0`` the
+        in-sample likelihood favours denser forests and the gain does not
+        carry over to new data. ``start_`` records the start chosen.
 
     Notes
     -----
@@ -840,6 +854,7 @@ class MFCF:
         alpha: float = 0.05,
         n_samples: Optional[int] = None,
         new_component: str = "strongest",
+        n_starts: int = 1,
     ) -> None:
         if gain_function_type is None:
             warnings.warn(_DEFAULT_CHANGE_MSG, FutureWarning, stacklevel=2)
@@ -848,6 +863,11 @@ class MFCF:
         if new_component not in ("strongest", "first"):
             raise ValueError("new_component must be 'strongest' or 'first'")
         self._new_component = new_component
+        if (isinstance(n_starts, bool) or not isinstance(n_starts, (int, np.integer))
+                or not 1 <= n_starts <= max_clique_size):
+            raise ValueError("n_starts must be an integer between 1 and max_clique_size")
+        self._n_starts = int(n_starts)
+        self._seed_override = None
         self._threshold = threshold
         self._min_clique_size = min_clique_size
         self._max_clique_size = max_clique_size
@@ -892,6 +912,84 @@ class MFCF:
         - Logging at INFO/DEBUG provides a step-by-step trace.
         """
         self._C = C
+        best = None
+        seeds = self._start_seeds(min(self._n_starts, C.shape[0]))
+        for k, seed in enumerate(seeds):
+            self._seed_override = seed
+            try:
+                self._build()
+            finally:
+                self._seed_override = None
+            if len(seeds) == 1:
+                break
+            score = self._objective()
+            if best is None or score > best[0] + 1e-12:
+                best = (score, k, self._cliques, self._separators_count, self._peo)
+        self.start_ = 0
+        if best is not None:
+            _, self.start_, self._cliques, self._separators_count, self._peo = best
+
+        matrix_for_logo = cov_matrix if cov_matrix is not None else C
+        try:
+            J_logo = self._logo(matrix_for_logo, self._cliques, self._separators_count)
+        except LA.LinAlgError:
+            # e.g. a general weight matrix: LoGo needs covariance blocks
+            logger.warning("LoGo not computed: clique blocks of the matrix are singular; "
+                           "pass cov_matrix to obtain a precision estimate")
+            J_logo = None
+        return self._cliques, self._separators_count, self._peo, J_logo
+
+    def _start_seeds(self, k: int) -> List[Optional[Clique]]:
+        """Seeds of the k starts: the default seed, then vertices spread over
+        the network, each strong but weakly related to the seeds already
+        chosen (largest ``s_v (1 - max_u W_vu)`` with ``s`` the strength and
+        ``W`` the squared correlations, or the weights for "sum"); a seed
+        with more than one vertex adds its strongest neighbours."""
+        if k == 1:
+            return [None]
+        m = max(1, self._min_clique_size - 1)
+        C = np.asarray(self._C, dtype=float)
+        W = np.abs(C) if self._gf_type == "sum" else C * C
+        W = W - np.diag(np.diag(W))
+        if self._gf_type == "sum" and W.max() > 0:
+            W = W / W.max()
+        elif self._gf_type != "sum":
+            d = np.sqrt(np.diag(C))
+            W = W / np.outer(d, d) ** 2                 # squared correlations
+        strength = W.sum(axis=1)
+        first = self._get_first_clique()
+        chosen = sorted(first)
+        seeds = [None]
+        for _ in range(k - 1):
+            score = strength * (1 - W[:, chosen].max(axis=1))
+            score[chosen] = -np.inf
+            v = int(np.argmax(score))
+            nb = [int(u) for u in np.argsort(-W[v], kind="stable") if u != v][: m - 1]
+            seeds.append(frozenset([v] + nb))
+            chosen.append(v)
+        return seeds
+
+    def _objective(self) -> float:
+        """Objective of the current clique forest, used to compare starts."""
+        C = np.asarray(self._C, dtype=float)
+        if self._gf_type == "loglik":
+            def ld(q):
+                q = sorted(q)
+                sgn, val = np.linalg.slogdet(C[np.ix_(q, q)]) if q else (1.0, 0.0)
+                return val if sgn > 0 else -np.inf
+            return -0.5 * (sum(ld(q) for q in self._cliques)
+                           - sum(m * ld(sp) for sp, m in self._separators_count.items()))
+        W = np.abs(C) if self._gf_type == "sum" else C * C
+        E = np.zeros(C.shape, dtype=bool)
+        for q in self._cliques:
+            q = sorted(q)
+            E[np.ix_(q, q)] = True
+        np.fill_diagonal(E, False)
+        return float(W[E].sum() / 2)
+
+    def _build(self) -> None:
+        """One run of the greedy expansion from the current seed."""
+        C = self._C
         self._gains = Gains(C, self._threshold, self._min_clique_size, self._gf_type,
                             self._acceptance, self._alpha, self._n_samples,
                             root_chooser=self._choose_root)
@@ -906,16 +1004,6 @@ class MFCF:
 
         self._initialise()
         self._compute_mfcf()
-
-        matrix_for_logo = cov_matrix if cov_matrix is not None else C
-        try:
-            J_logo = self._logo(matrix_for_logo, self._cliques, self._separators_count)
-        except LA.LinAlgError:
-            # e.g. a general weight matrix: LoGo needs covariance blocks
-            logger.warning("LoGo not computed: clique blocks of the matrix are singular; "
-                           "pass cov_matrix to obtain a precision estimate")
-            J_logo = None
-        return self._cliques, self._separators_count, self._peo, J_logo
 
     def fit(
         self,
@@ -1073,6 +1161,8 @@ class MFCF:
         Clique
             Initial clique of size `max(0, min_clique_size - 1)`.
         """
+        if self._seed_override is not None:
+            return self._seed_override
         C1 = self._C.copy()
         r, c = np.nonzero(self._C <= self._C.mean())
         C1[r, c] = 0

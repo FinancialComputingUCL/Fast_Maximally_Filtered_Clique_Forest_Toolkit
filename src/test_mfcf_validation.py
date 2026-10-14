@@ -198,8 +198,8 @@ def test_option_validation():
     W[0, 1] = W[1, 0] = 1.5
     with pytest.raises(ValueError):
         MFCF().run(W)
-    cl, _, _, _ = MFCF(gain_function_type="sumsquares").run(W)     # weight gains accept it
-    assert sorted({int(v) for q in cl for v in q}) == list(range(10))
+    with pytest.raises(ValueError, match="sumsquares"):
+        MFCF(gain_function_type="sumsquares").run(W)              # correlations only
     with pytest.raises(ValueError):
         MFCF(gain_function_type="sum").run(W)                     # negative weights rejected
     cl, _, _, _ = MFCF(gain_function_type="sum").run(np.abs(W))

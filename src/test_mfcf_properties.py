@@ -455,3 +455,69 @@ def test_rank_correlation_option_validation_and_estimators():
     m = MFCFLoGo(max_clique_size=3, correlation="kendall").fit(X)
     assert m.get_params()["correlation"] == "kendall"
     assert np.all(np.isfinite(m.precision_))
+
+
+# ------------------------------------------------------------- n_starts
+def _sample_corr(seed=0, p=30, n=200):
+    S, _ = _chordal_model(p=p, seed=seed)
+    X = np.random.default_rng(seed).multivariate_normal(np.zeros(p), S, size=n)
+    return np.corrcoef(X, rowvar=False)
+
+
+@pytest.mark.parametrize("bad", [0, 6, 2.0, True, -1])
+def test_n_starts_validation(bad):
+    with pytest.raises(ValueError):
+        MFCF(gain_function_type="loglik", max_clique_size=5, n_starts=bad)
+
+
+def test_n_starts_one_is_default():
+    R = _sample_corr()
+    kw = dict(gain_function_type="loglik", max_clique_size=5, acceptance="ftest", n_samples=200)
+    a, b = MFCF(**kw).run(R), MFCF(n_starts=1, **kw).run(R)
+    assert a[0] == b[0] and a[1] == b[1]
+
+
+@pytest.mark.parametrize("gain,kw", [("loglik", dict(acceptance="ftest", n_samples=200)),
+                                     ("loglik", dict(threshold=0.02)),
+                                     ("sumsquares", dict(threshold=0.01)),
+                                     ("sum", dict(threshold=0.01))])
+@pytest.mark.parametrize("seed", range(6))
+def test_n_starts_never_lowers_the_objective(gain, kw, seed):
+    R = _sample_corr(seed)
+    C = np.abs(R) if gain == "sum" else R
+    one = MFCF(gain_function_type=gain, max_clique_size=5, **kw)
+    one.run(C)
+    many = MFCF(gain_function_type=gain, max_clique_size=5, n_starts=5, **kw)
+    cl, seps, peo, J = many.run(C)
+    assert 0 <= many.start_ < 5
+    assert many._objective() >= one._objective() - 1e-9
+    assert max(len(q) for q in cl) <= 5 and nx.is_chordal(nx.from_numpy_array(_edges(cl, C.shape[0]).astype(int)))
+    assert sorted(int(v) for v in peo) == list(range(C.shape[0]))
+
+
+def test_n_starts_objective_is_decomposable_loglik():
+    R = _sample_corr(1)
+    m = MFCF(gain_function_type="loglik", max_clique_size=4, n_starts=3, acceptance="ftest", n_samples=200)
+    cl, seps, _, J = m.run(R)
+    # decomposable MLE: -1/2 logdet(R J^-1 ...) equals -1/2 log det(J^-1) on R's scale
+    assert m._objective() == pytest.approx(0.5 * np.linalg.slogdet(J)[1], rel=1e-8)
+
+
+def test_n_starts_relabelling_and_min_clique_size():
+    R = _sample_corr(2)
+    kw = dict(gain_function_type="loglik", max_clique_size=5, min_clique_size=3,
+              acceptance="ftest", n_samples=200, n_starts=4)
+    base = {frozenset(q) for q in MFCF(**kw).run(R)[0]}
+    for s in range(5):
+        P = np.random.default_rng(s).permutation(len(R))
+        cl = MFCF(**kw).run(R[np.ix_(P, P)])[0]
+        assert {frozenset(int(P[v]) for v in q) for q in cl} == base
+
+
+def test_n_starts_in_estimators():
+    from mfcf_logo import MFCFLoGo, MFCFLoGoCV
+    X = np.random.default_rng(3).multivariate_normal(np.zeros(12), _chordal_model(p=12)[0], size=150)
+    m = MFCFLoGo(gain_function_type="loglik", max_clique_size=4, n_starts=4, acceptance="ftest").fit(X)
+    assert np.all(np.isfinite(m.precision_))
+    cv = MFCFLoGoCV(gain_function_type="loglik", max_clique_size_grid=[2, 4], n_starts=4).fit(X)
+    assert np.all(np.isfinite(cv.precision_))                        # n_starts capped at k = 2

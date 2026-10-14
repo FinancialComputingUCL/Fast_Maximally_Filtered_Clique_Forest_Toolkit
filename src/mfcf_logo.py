@@ -51,6 +51,10 @@ class MFCFLoGo(EmpiricalCovariance):
     new_component : {'strongest', 'first'}, default='strongest'
         Vertex that starts a new component (see `MFCF`).
 
+    n_starts : int, default=1
+        Number of starting cliques, at most `max_clique_size`; the clique
+        forest with the largest objective is kept (see `MFCF`).
+
     shrinkage : float, default=0.0
         Identity shrinkage of the correlation blocks of the LoGo assembly.
 
@@ -100,6 +104,7 @@ class MFCFLoGo(EmpiricalCovariance):
         acceptance: str = "threshold",
         alpha: float = 0.05,
         new_component: str = "strongest",
+        n_starts: int = 1,
         shrinkage: float = 0.0,
         n_effective=None,
         correlation: str = "pearson",
@@ -114,6 +119,7 @@ class MFCFLoGo(EmpiricalCovariance):
         self.acceptance = acceptance
         self.alpha = alpha
         self.new_component = new_component
+        self.n_starts = n_starts
         self.shrinkage = shrinkage
         self.n_effective = n_effective
         self.correlation = correlation
@@ -157,6 +163,7 @@ class MFCFLoGo(EmpiricalCovariance):
             acceptance=self.acceptance,
             alpha=self.alpha,
             new_component=self.new_component,
+            n_starts=self.n_starts,
         )
         # structure from the sample correlation; precision on the covariance
         # scale of X (LoGo of the correlation blocks rescaled by the variances)
@@ -270,6 +277,10 @@ class MFCFLoGoCV(EmpiricalCovariance):
     new_component : {'strongest', 'first'}, default='strongest'
         Vertex that starts a new component (see `MFCF`).
 
+    n_starts : int, default=1
+        Number of starting cliques, at most `max_clique_size`; the clique
+        forest with the largest objective is kept (see `MFCF`).
+
     assume_centered : bool, default=False
         If True, data are not centered before computation.
         Useful when working with data whose mean is almost, but not exactly
@@ -339,6 +350,7 @@ class MFCFLoGoCV(EmpiricalCovariance):
         acceptance: str = "threshold",
         alpha: float = 0.05,
         new_component: str = "strongest",
+        n_starts: int = 1,
         shrinkage: float = 0.0,
         n_effective=None,
         correlation: str = "pearson",
@@ -359,6 +371,7 @@ class MFCFLoGoCV(EmpiricalCovariance):
         self.acceptance = acceptance
         self.alpha = alpha
         self.new_component = new_component
+        self.n_starts = n_starts
         self.shrinkage = shrinkage
         self.n_effective = n_effective
         self.correlation = correlation
@@ -442,6 +455,7 @@ class MFCFLoGoCV(EmpiricalCovariance):
                         acceptance=self.acceptance,
                         alpha=self.alpha,
                         new_component=self.new_component,
+                        n_starts=min(self.n_starts, k),
                         shrinkage=self.shrinkage,
                         n_effective=self.n_effective,
                         correlation=self.correlation,
@@ -508,6 +522,7 @@ class MFCFLoGoCV(EmpiricalCovariance):
             acceptance=self.acceptance,
             alpha=self.alpha,
             new_component=self.new_component,
+            n_starts=min(self.n_starts, best_k),
             shrinkage=self.shrinkage,
             n_effective=self.n_effective,
             correlation=self.correlation,
@@ -612,6 +627,10 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
     new_component : {'strongest', 'first'}, default='strongest'
         Vertex that starts a new component (see `MFCF`).
 
+    n_starts : int, default=1
+        Number of starting cliques, at most `max_clique_size`; the clique
+        forest with the largest objective is kept (see `MFCF`).
+
     assume_centered : bool, default=False
         If True, data are not centered before computation.
         Useful when working with data whose mean is almost, but not exactly
@@ -685,6 +704,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         acceptance: str = "threshold",
         alpha: float = 0.05,
         new_component: str = "strongest",
+        n_starts: int = 1,
         shrinkage: float = 0.0,
         n_effective=None,
         correlation: str = "pearson",
@@ -708,6 +728,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         self.acceptance = acceptance
         self.alpha = alpha
         self.new_component = new_component
+        self.n_starts = n_starts
         self.shrinkage = shrinkage
         self.n_effective = n_effective
         self.correlation = correlation
@@ -725,6 +746,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             acceptance=self.acceptance,
             alpha=self.alpha,
             new_component=self.new_component,
+            n_starts=self.n_starts,
             shrinkage=self.shrinkage,
             n_effective=self.n_effective,
             correlation=self.correlation,
@@ -781,6 +803,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             #     + ", ".join(f"{k}={v}" for k, v in params.items()),
             #     flush=True,
             # )
+            params["n_starts"] = min(params["n_starts"], params["max_clique_size"])
             est = MFCFLoGo(**params, assume_centered=self.assume_centered)
 
             cv = KFold(n_splits=self.cv, shuffle=self.shuffle,
@@ -803,11 +826,13 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             acceptance=self.acceptance,
             alpha=self.alpha,
             new_component=self.new_component,
+            n_starts=self.n_starts,
             shrinkage=self.shrinkage,
             n_effective=self.n_effective,
             correlation=self.correlation,
         )
         final_params.update(best_params)
+        final_params["n_starts"] = min(final_params["n_starts"], final_params["max_clique_size"])
         # print(best_params, flush=True)
 
         return final_params

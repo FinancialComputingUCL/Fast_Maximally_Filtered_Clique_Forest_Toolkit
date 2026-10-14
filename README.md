@@ -65,9 +65,9 @@ accordingly:
 
 | Input `C` | `gain_function_type` | Gain of attaching `v` to `S` | `acceptance` |
 |---|---|---|---|
-| covariance / correlation | `"loglik"` (default) | exact `-1/2 log(1 - R^2_{v|S})` | `"threshold"`, `"ftest"`, `"bic"` |
-| any weight matrix | `"sumsquares"` | `sum_{u in S} C[v,u]^2` | `"threshold"` |
-| non-negative weight matrix (checked) | `"sum"` | `sum_{u in S} C[v,u]` | `"threshold"` |
+| covariance / correlation (checked) | `"loglik"` (default) | exact `-1/2 log(1 - R^2_{v|S})` | `"threshold"`, `"ftest"`, `"bic"` |
+| covariance / correlation (checked) | `"sumsquares"` | `sum_{u in S} C[v,u]^2`, the original approximation | `"threshold"` |
+| non-negative weight / similarity matrix (checked) | `"sum"` | `sum_{u in S} C[v,u]` | `"threshold"` |
 
 With `"loglik"`, `S` is grown greedily inside a clique (or facet), adding at
 each step the vertex with the largest squared partial correlation with `v`.
@@ -89,14 +89,12 @@ every step: every clique then grows to `max_clique_size`, and the result is the
 fixed-size construction. Variable clique sizes come from `threshold > 0` or a
 statistical rule.
 
-With the weight gains, `threshold` applies to each `C[v,u]^2` ("sumsquares") or
-`C[v,u]` ("sum"), exactly as in earlier versions. Weights must be non-negative:
-"sum" raises an error for negative off-diagonal entries, and "sumsquares" is
-"sum" applied to the non-negative weights `C**2`, so signed correlations can
-be passed to it directly. `"loglik"` checks that `C` is
-a valid covariance or correlation matrix and raises an error otherwise. For a
-weight matrix, `run()` returns `None` for the LoGo matrix unless `cov_matrix`
-is given.
+With `"sumsquares"` and `"sum"`, `threshold` applies to each `C[v,u]^2` or
+`C[v,u]`, exactly as in earlier versions. `"loglik"` and `"sumsquares"` check
+that `C` is a valid covariance or correlation matrix (signed entries allowed);
+`"sum"` checks that the weights are non-negative. Each raises an error
+otherwise. For a weight matrix, `run()` returns `None` for the LoGo matrix
+unless `cov_matrix` is given.
 
 ```python
 import numpy as np
@@ -152,7 +150,7 @@ m.n_effective_                            # observations used by the test
 
 The LoGo estimators (`MFCFLoGo`, `MFCFLoGoCV`, `MFCFLoGoCVAll`) are built on
 `fit(X)` and accept the same options (`acceptance`, `alpha`, `new_component`,
-`shrinkage`, `n_effective`, `correlation`); `MFCFLoGoCVAll` can tune `alpha`
+`n_starts`, `shrinkage`, `n_effective`, `correlation`); `MFCFLoGoCVAll` can tune `alpha`
 (`tunable_params=("alpha", ...)`). Their `precision_` and `covariance_` are on
 the covariance scale of the data (earlier versions returned the precision of
 the correlation matrix).
@@ -163,8 +161,9 @@ is sparse; on dense data the two covariance-based options perform similarly.
 Gains are cached per separator, and for fixed clique sizes all facets of a
 clique are scored from a single regression, so the exact gain runs at a cost
 comparable to the approximation (faster for fixed clique sizes). To reproduce
-results of earlier versions exactly, pass `gain_function_type="sumsquares"`
-(the former default) and `new_component="first"`.
+results of earlier versions exactly on a covariance or correlation matrix,
+pass `gain_function_type="sumsquares"` (the former default) and
+`new_component="first"`.
 
 #### Starting new components (`new_component`)
 
@@ -174,6 +173,20 @@ the statistical test), it starts a new component of the clique forest. With
 dependence on the remaining vertices is chosen, so the result does not depend
 on the order of the variables. `new_component="first"` takes the vertex with
 the lowest index, as earlier versions did.
+
+#### Several starts (`n_starts`)
+
+The expansion is greedy, so its result depends on where it starts.
+`n_starts=k` (at most `max_clique_size`) runs it from the default seed and
+from `k - 1` further seeds spread over the network (strong vertices weakly
+related to the seeds already chosen), and keeps the clique forest with the
+largest objective: the decomposable Gaussian log-likelihood for `"loglik"`,
+the total (squared) edge weight for `"sum"` (`"sumsquares"`). The chosen start
+is in `start_`. It costs `k` runs. With the F-test and `k = max_clique_size = 5`
+it recovered 60-90% of the test log-likelihood gain of trying every vertex as
+a start, in simulations of chordal and factor models. Use it with a
+statistical acceptance rule: with `threshold=0` the in-sample likelihood
+favours denser forests and the gain does not carry over to new data.
 
 ### Precision Estimation (`MFCFLoGO()`)
 ```python
@@ -231,15 +244,21 @@ best_params = tuned.estimator_
 - `estimator_` stores the final `MFCFLoGo` instance fitted with the best parameters.
 
 ### Hierarchical Clustering with DBHT (`mfcf_dbht()`)
+
+The backbone is built on a non-negative similarity `S` with the `"sum"` gain
+(default); for a signed correlation matrix pass `gain_function_type="loglik"`
+or `"sumsquares"`.
+
 ```python
 import numpy as np
 from scipy.cluster.hierarchy import fcluster
 from mfcf_dbht import mfcf_dbhts
 
 X = ...  # samples x features
-S = np.corrcoef(X, rowvar=False)                 # similarity between features
-D = np.sqrt(np.clip(2 * (1 - S), 0, None))       # matching distance
+R = np.corrcoef(X, rowvar=False)
+D = np.sqrt(np.clip(2 * (1 - R), 0, None))       # distance between features
 np.fill_diagonal(D, 0.0)
+S = (1 + R) / 2                                  # non-negative similarity, 1 - D**2 / 4
 
 T8, Rpm, Adjv, Dpm, Mv, Z = mfcf_dbhts(D, S, min_clique_size=2, max_clique_size=6)
 labels = fcluster(Z, t=4, criterion="maxclust")  # e.g. four clusters

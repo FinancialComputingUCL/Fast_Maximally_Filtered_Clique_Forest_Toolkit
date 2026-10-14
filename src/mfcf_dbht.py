@@ -40,10 +40,11 @@ def mfcf_dbhts(
     min_clique_size: int = 1,
     max_clique_size: int = 4,
     coordination_number: int = np.inf,
-    gain_function_type: str = "sumsquares",
+    gain_function_type: str = "sum",
     acceptance: str = "threshold",
     alpha: float = 0.05,
     new_component: str = "strongest",
+    n_starts: int = 1,
     n_samples: int = None,
 ):
     """
@@ -127,6 +128,7 @@ def mfcf_dbhts(
         acceptance=acceptance,
         alpha=alpha,
         new_component=new_component,
+        n_starts=n_starts,
         n_samples=n_samples,
     )
     cliques, _, _, _ = builder.run(C=S, cov_matrix=np.eye(S.shape[0]))
