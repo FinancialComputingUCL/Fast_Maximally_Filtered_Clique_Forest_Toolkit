@@ -244,3 +244,31 @@ def test_dbht_rejects_disconnected_graph():
     D = np.sqrt(np.clip(2 * (1 - S), 0, None)); np.fill_diagonal(D, 0.0)
     with pytest.raises(ValueError, match="connected"):
         mfcf_dbhts(D, S, threshold=0.5, max_clique_size=4, gain_function_type="sumsquares")
+
+
+@pytest.mark.parametrize("kw", [dict(max_clique_size=6, acceptance="ftest", alpha=0.01),
+                                dict(max_clique_size=6, threshold=0.05),
+                                dict(max_clique_size=6, threshold=0.1, gain_function_type="sumsquares")])
+def test_relabelling_equivariance_with_new_components(kw):
+    """With vertices that cannot be attached (new components), the clique
+    forest must still not depend on the order of the variables."""
+    rng = np.random.default_rng(0)
+    blocks = np.repeat(np.arange(3), 6)
+    X = np.hstack([rng.standard_normal((500, 3))[:, blocks] + 0.7 * rng.standard_normal((500, 18)),
+                   rng.standard_normal((500, 6))])                     # 6 noise variables
+    base = {frozenset(int(v) for v in q) for q in MFCF(**kw).fit(X).cliques_}
+    assert sum(len(q) == 1 for q in base) >= 1                         # new components do occur
+    for s in range(10):
+        perm = np.random.default_rng(s).permutation(X.shape[1])
+        m = MFCF(**kw).fit(X[:, perm])
+        assert {frozenset(int(perm[v]) for v in q) for q in m.cliques_} == base
+
+
+def test_new_component_option():
+    C = np.corrcoef(_data(), rowvar=False)
+    with pytest.raises(ValueError):
+        MFCF(new_component="random")
+    a = MFCF(max_clique_size=4, threshold=0.3, new_component="first").run(C)
+    b = MFCF(max_clique_size=4, threshold=0.3, new_component="strongest").run(C)
+    for out in (a, b):
+        _valid(out[0], C.shape[0], 4)

@@ -47,6 +47,9 @@ class MFCFLoGo(EmpiricalCovariance):
     alpha : float, default=0.05
         Level of the partial F-test (acceptance='ftest').
 
+    new_component : {'strongest', 'first'}, default='strongest'
+        Vertex that starts a new component (see `MFCF`).
+
     shrinkage : float, default=0.0
         Identity shrinkage of the correlation blocks of the LoGo assembly.
 
@@ -91,6 +94,7 @@ class MFCFLoGo(EmpiricalCovariance):
         gain_function_type: str = "loglik",
         acceptance: str = "threshold",
         alpha: float = 0.05,
+        new_component: str = "strongest",
         shrinkage: float = 0.0,
         n_effective=None,
         assume_centered: bool = False,
@@ -103,6 +107,7 @@ class MFCFLoGo(EmpiricalCovariance):
         self.gain_function_type = gain_function_type
         self.acceptance = acceptance
         self.alpha = alpha
+        self.new_component = new_component
         self.shrinkage = shrinkage
         self.n_effective = n_effective
 
@@ -144,6 +149,7 @@ class MFCFLoGo(EmpiricalCovariance):
             gain_function_type=self.gain_function_type,
             acceptance=self.acceptance,
             alpha=self.alpha,
+            new_component=self.new_component,
         )
         # structure from the sample correlation; precision on the covariance
         # scale of X (LoGo of the correlation blocks rescaled by the variances)
@@ -251,6 +257,9 @@ class MFCFLoGoCV(EmpiricalCovariance):
     alpha : float, default=0.05
         Level of the partial F-test (acceptance='ftest').
 
+    new_component : {'strongest', 'first'}, default='strongest'
+        Vertex that starts a new component (see `MFCF`).
+
     assume_centered : bool, default=False
         If True, data are not centered before computation.
         Useful when working with data whose mean is almost, but not exactly
@@ -319,6 +328,7 @@ class MFCFLoGoCV(EmpiricalCovariance):
         gain_function_type: str = "loglik",
         acceptance: str = "threshold",
         alpha: float = 0.05,
+        new_component: str = "strongest",
         shrinkage: float = 0.0,
         n_effective=None,
         assume_centered: bool = False,
@@ -337,6 +347,7 @@ class MFCFLoGoCV(EmpiricalCovariance):
         self.gain_function_type = gain_function_type
         self.acceptance = acceptance
         self.alpha = alpha
+        self.new_component = new_component
         self.shrinkage = shrinkage
         self.n_effective = n_effective
         self.assume_centered = assume_centered
@@ -418,6 +429,7 @@ class MFCFLoGoCV(EmpiricalCovariance):
                         gain_function_type=self.gain_function_type,
                         acceptance=self.acceptance,
                         alpha=self.alpha,
+                        new_component=self.new_component,
                         shrinkage=self.shrinkage,
                         n_effective=self.n_effective,
                         assume_centered=self.assume_centered,
@@ -482,6 +494,7 @@ class MFCFLoGoCV(EmpiricalCovariance):
             gain_function_type=self.gain_function_type,
             acceptance=self.acceptance,
             alpha=self.alpha,
+            new_component=self.new_component,
             shrinkage=self.shrinkage,
             n_effective=self.n_effective,
             assume_centered=self.assume_centered,
@@ -580,6 +593,9 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
     alpha : float, default=0.05
         Level of the partial F-test (acceptance='ftest').
 
+    new_component : {'strongest', 'first'}, default='strongest'
+        Vertex that starts a new component (see `MFCF`).
+
     assume_centered : bool, default=False
         If True, data are not centered before computation.
         Useful when working with data whose mean is almost, but not exactly
@@ -652,6 +668,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         gain_function_type: str = "loglik",
         acceptance: str = "threshold",
         alpha: float = 0.05,
+        new_component: str = "strongest",
         shrinkage: float = 0.0,
         n_effective=None,
         assume_centered: bool = False,
@@ -673,6 +690,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         self.gain_function_type = gain_function_type
         self.acceptance = acceptance
         self.alpha = alpha
+        self.new_component = new_component
         self.shrinkage = shrinkage
         self.n_effective = n_effective
         self.assume_centered = assume_centered
@@ -688,6 +706,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             gain_function_type=self.gain_function_type,
             acceptance=self.acceptance,
             alpha=self.alpha,
+            new_component=self.new_component,
             shrinkage=self.shrinkage,
             n_effective=self.n_effective,
         )
@@ -759,6 +778,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             gain_function_type=self.gain_function_type,
             acceptance=self.acceptance,
             alpha=self.alpha,
+            new_component=self.new_component,
             shrinkage=self.shrinkage,
             n_effective=self.n_effective,
         )

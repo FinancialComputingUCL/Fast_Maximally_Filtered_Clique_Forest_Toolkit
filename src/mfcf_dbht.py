@@ -43,6 +43,7 @@ def mfcf_dbhts(
     gain_function_type: str = "loglik",
     acceptance: str = "threshold",
     alpha: float = 0.05,
+    new_component: str = "strongest",
     n_samples: int = None,
 ):
     """
@@ -125,6 +126,7 @@ def mfcf_dbhts(
         gain_function_type=gain_function_type,
         acceptance=acceptance,
         alpha=alpha,
+        new_component=new_component,
         n_samples=n_samples,
     )
     cliques, _, _, _ = builder.run(C=S, cov_matrix=np.eye(S.shape[0]))

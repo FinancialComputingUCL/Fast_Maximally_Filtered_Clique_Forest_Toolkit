@@ -147,8 +147,17 @@ is sparse; on dense data the two covariance-based options perform similarly.
 Gains are cached per separator, and for fixed clique sizes all facets of a
 clique are scored from a single regression, so the exact gain runs at a cost
 comparable to the approximation (faster for fixed clique sizes). To reproduce
-results of earlier versions, pass `gain_function_type="sumsquares"`, the
-former default.
+results of earlier versions exactly, pass `gain_function_type="sumsquares"`
+(the former default) and `new_component="first"`.
+
+#### Starting new components (`new_component`)
+
+When no vertex can be attached (its gain is below the threshold, or it fails
+the statistical test), it starts a new component of the clique forest. With
+`new_component="strongest"` (default) the vertex with the largest total
+dependence on the remaining vertices is chosen, so the result does not depend
+on the order of the variables. `new_component="first"` takes the vertex with
+the lowest index, as earlier versions did.
 
 ### Precision Estimation (`MFCFLoGO()`)
 ```python

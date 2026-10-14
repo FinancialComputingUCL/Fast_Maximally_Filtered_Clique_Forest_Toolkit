@@ -290,8 +290,11 @@ class Gains:
         acceptance: str = "threshold",
         alpha: float = 0.05,
         n_samples: Optional[int] = None,
+        root_chooser=None,
     ):
         _check_options(gf_type, acceptance, alpha, n_samples)
+        # vertex used to start a new component (default: lowest index)
+        self._root = root_chooser or (lambda mask: int(np.argmax(mask)))
         if gf_type == "sumsquares":
             self._W = np.square(C)
         elif gf_type == "sum":
@@ -372,7 +375,7 @@ class Gains:
         """
         if not sep:
             # With empty sep, all gains are 0; choose the first outstanding node
-            first = int(outstanding_nodes_mask.argmax())
+            first = self._root(outstanding_nodes_mask)
             empty = frozenset()
             return 0.0, first, SeparatorWrapper(empty, empty)
 
@@ -425,7 +428,7 @@ class Gains:
             cols = np.asarray(sorted(key), dtype=int)
             rows = np.setdiff1d(np.flatnonzero(outstanding_nodes_mask), cols)
             if len(rows) == 0:                       # nothing to attach to this separator
-                return -np.inf, int(np.argmax(outstanding_nodes_mask)), SeparatorWrapper(frozenset(), key)
+                return -np.inf, self._root(outstanding_nodes_mask), SeparatorWrapper(frozenset(), key)
             g, _ = self._loglik_sweep(rows, cols)
             self._store(key, rows, g)
             v, gain = self._cached_best(key, outstanding_nodes_mask)
@@ -739,6 +742,12 @@ class MFCF:
         Level of the partial F-test.
     n_samples : int, optional
         Number of observations used to compute `C` ("ftest", "bic").
+    new_component : {"strongest", "first"}, default="strongest"
+        Vertex that starts a new component when no attachment is accepted:
+        "strongest" takes the outstanding vertex with the largest sum of
+        squared similarities to the other outstanding vertices (independent
+        of the labelling of the variables); "first" takes the lowest index,
+        as in versions before 2026.10.
 
     Notes
     -----
@@ -770,8 +779,12 @@ class MFCF:
         acceptance: str = "threshold",
         alpha: float = 0.05,
         n_samples: Optional[int] = None,
+        new_component: str = "strongest",
     ) -> None:
         _check_options(gain_function_type, acceptance, alpha, n_samples, require_n=False)
+        if new_component not in ("strongest", "first"):
+            raise ValueError("new_component must be 'strongest' or 'first'")
+        self._new_component = new_component
         self._threshold = threshold
         self._min_clique_size = min_clique_size
         self._max_clique_size = max_clique_size
@@ -817,7 +830,8 @@ class MFCF:
         """
         self._C = C
         self._gains = Gains(C, self._threshold, self._min_clique_size, self._gf_type,
-                            self._acceptance, self._alpha, self._n_samples)
+                            self._acceptance, self._alpha, self._n_samples,
+                            root_chooser=self._choose_root)
         self._gf = self._gains.get_best_gain
         # total-gain threshold for starting a new component, on the gain's scale
         if self._gf_type != "loglik":
@@ -1015,7 +1029,7 @@ class MFCF:
                 sep = self._cliques[-1]
                 gain, v, sep_wrapper = (
                     0.0,
-                    int(self._outstanding_nodes_mask.argmax()),
+                    self._choose_root(self._outstanding_nodes_mask),
                     SeparatorWrapper(sep, sep),
                 )
 
@@ -1075,6 +1089,16 @@ class MFCF:
             return True
         return False
 
+    def _choose_root(self, mask: np.ndarray) -> Node:
+        """Vertex that starts a new component."""
+        out = np.flatnonzero(mask)
+        if self._new_component == "first" or len(out) <= 1:
+            return int(out[0])
+        W = self._C[np.ix_(out, out)]
+        W = W * W if self._gf_type != "sum" else np.abs(W)
+        strength = W.sum(axis=1) - np.diag(W)
+        return int(out[np.argmax(strength)])        # ties: lowest index
+
     def _apply_threshold_and_find_parent(
         self, gain: float, v: Node, sep: Separator
     ) -> Tuple[Node, Separator, Optional[Clique]]:
@@ -1107,7 +1131,7 @@ class MFCF:
         pos_gain = -gain  # negate back to positive for threshold compare
         if pos_gain < self._component_threshold:
             # start a new clique
-            v = int(self._outstanding_nodes_mask.argmax())
+            v = self._choose_root(self._outstanding_nodes_mask)
             sep = frozenset()
             parent_clique = frozenset()
         else:
