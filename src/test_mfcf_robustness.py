@@ -234,3 +234,13 @@ def test_cv_handles_failing_fits():
     assert np.all(np.isfinite(cv.precision_))
     m = MFCFLoGo(max_clique_size=3).fit(X)
     assert m.get_precision().shape == (12, 12) and m.get_covariance().shape == (12, 12)
+
+
+def test_dbht_rejects_disconnected_graph():
+    pytest.importorskip("riskfolio")
+    from mfcf_dbht import mfcf_dbhts
+    rng = np.random.default_rng(0)
+    S = np.corrcoef(rng.standard_normal((300, 12)), rowvar=False)   # independent noise
+    D = np.sqrt(np.clip(2 * (1 - S), 0, None)); np.fill_diagonal(D, 0.0)
+    with pytest.raises(ValueError, match="connected"):
+        mfcf_dbhts(D, S, threshold=0.5, max_clique_size=4, gain_function_type="sumsquares")

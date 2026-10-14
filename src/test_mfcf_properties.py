@@ -281,3 +281,94 @@ def test_sklearn_estimator_checks():
     for check in (check_get_params_invariance, check_dont_overwrite_parameters, check_fit_idempotent,
                   check_estimators_pickle, check_n_features_in):
         check("MFCFLoGo", est)
+
+
+# ------------------------------------------------- exact acceptance boundaries
+def _ols_partial_f_pvalue(y, X_old, x_new):
+    """p-value of adding x_new to the regression of y on X_old (with intercept)."""
+    n = len(y)
+    def rss(M):
+        A = np.column_stack([np.ones(n), M]) if M.size else np.ones((n, 1))
+        beta, *_ = np.linalg.lstsq(A, y, rcond=None)
+        r = y - A @ beta
+        return r @ r, A.shape[1]
+    r0, _ = rss(X_old)
+    r1, k1 = rss(np.column_stack([X_old, x_new]) if X_old.size else x_new[:, None])
+    df2 = n - k1
+    F = (r0 - r1) / (r1 / df2)
+    return stats.f.sf(F, 1, df2)
+
+
+@pytest.mark.parametrize("n", [6, 9, 15])
+def test_ftest_matches_ols_nested_test(n):
+    """The first two greedy steps must accept exactly when an independent OLS
+    nested-model F-test (with intercept) rejects at level alpha."""
+    rng = np.random.default_rng(n)
+    alpha, agree, total = 0.1, 0, 0
+    for _ in range(300):
+        X = rng.standard_normal((n, 3))
+        X[:, 0] += rng.uniform(0, 1.5) * X[:, 1] + rng.uniform(0, 1.5) * X[:, 2]
+        C = np.corrcoef(X, rowvar=False)
+        g, v, sw = Gains(C, 0.0, 1, "loglik", "ftest", alpha, n).get_best_gain(
+            np.array([True, False, False]), frozenset({1, 2}))
+        Z = (X - X.mean(0)) / X.std(0)
+        y = Z[:, 0]
+        # greedy order: the regressor with the larger squared correlation first
+        first = 1 if C[0, 1] ** 2 >= C[0, 2] ** 2 else 2
+        second = 3 - first
+        p1 = _ols_partial_f_pvalue(y, np.empty((n, 0)), Z[:, first])
+        expect = set()
+        if p1 < alpha:
+            expect.add(first)
+            if _ols_partial_f_pvalue(y, Z[:, [first]], Z[:, second]) < alpha:
+                expect.add(second)
+        agree += set(sw.separator) == expect
+        total += 1
+    assert agree == total
+
+
+@pytest.mark.parametrize("n", [20, 100, 1000])
+def test_bic_boundary(n):
+    """BIC accepts a step iff n * (-log(1 - rho^2)) > log(n)."""
+    rho2_star = 1 - np.exp(-np.log(n) / n)
+    for rho2, accept in ((rho2_star * 1.001, True), (rho2_star * 0.999, False)):
+        r = np.sqrt(rho2)
+        C = np.array([[1.0, r], [r, 1.0]])
+        g, v, sw = Gains(C, 0.0, 1, "loglik", "bic", 0.05, n).get_best_gain(
+            np.array([True, False]), frozenset({1}))
+        assert (len(sw.separator) == 1) == accept
+
+
+def test_mandatory_picks_bypass_the_test():
+    """With min_clique_size = k, attachments of at least k - 1 vertices are
+    forced even on pure noise, whatever the statistical rule says."""
+    rng = np.random.default_rng(0)
+    C = np.corrcoef(rng.standard_normal((300, 15)), rowvar=False)
+    for rule in ("ftest", "bic"):
+        cl, seps, peo, _ = MFCF(min_clique_size=3, max_clique_size=5, acceptance=rule,
+                                alpha=1e-8, n_samples=300).run(C)
+        assert all(len(q) >= 3 for q in cl)
+
+
+@pytest.mark.parametrize("rule", ["ftest", "bic", "threshold"])
+def test_mandatory_picks_at_gain_level(rule):
+    """On pure noise, with min_clique_size = 3 a candidate keeps exactly the
+    2 mandatory vertices of a 3-vertex separator, whatever the rule says."""
+    rng = np.random.default_rng(1)
+    C = np.corrcoef(rng.standard_normal((300, 6)), rowvar=False)
+    mask = np.zeros(6, dtype=bool)
+    mask[3:] = True
+    g, v, sw = Gains(C, 0.99, 3, "loglik", rule, 1e-8, 300).get_best_gain(mask, frozenset({0, 1, 2}))
+    assert len(sw.separator) == 2 and g > 0
+
+
+@pytest.mark.parametrize("tau", [0.01, 0.05, 0.2])
+def test_component_threshold_on_gain_scale(tau):
+    """With acceptance='threshold' the new-component rule compares the total
+    gain with -1/2 log(1 - tau), the gain of one edge at the threshold: a pair
+    with rho^2 just above tau is connected, just below it is not."""
+    for rho2, connected in ((tau * 1.2, True), (tau * 0.8, False)):
+        r = np.sqrt(rho2)
+        C = np.array([[1.0, r], [r, 1.0]])
+        cl, _, _, _ = MFCF(max_clique_size=2, threshold=tau).run(C)
+        assert (len(cl) == 1) == connected

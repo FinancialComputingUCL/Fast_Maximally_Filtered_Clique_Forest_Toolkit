@@ -127,8 +127,14 @@ def mfcf_dbhts(
         alpha=alpha,
         n_samples=n_samples,
     )
-    cliques, _, _, _ = builder.run(C=S)
+    cliques, _, _, _ = builder.run(C=S, cov_matrix=np.eye(S.shape[0]))
     Rpm = _convert_cliques_to_adjacency(cliques, S)
+    if not _is_connected(Rpm):
+        raise ValueError(
+            "DBHT requires a connected MFCF graph, but the attachment rule left "
+            "isolated components; lower `threshold` (or use acceptance='threshold' "
+            "with threshold=0) so that every vertex is attached"
+        )
 
     Apm = Rpm.copy()
     Apm[Apm != 0] = D[Apm != 0].copy()
@@ -152,6 +158,20 @@ def mfcf_dbhts(
         Z = optimal_leaf_ordering(Z, squareform(Dsym))
 
     return (T8, Rpm, Adjv, Dpm, Mv, Z)
+
+
+def _is_connected(A) -> bool:
+    """True if the graph with adjacency pattern A (nonzero entries) is connected."""
+    n = A.shape[0]
+    seen = np.zeros(n, dtype=bool)
+    stack = [0]
+    seen[0] = True
+    while stack:
+        i = stack.pop()
+        for j in np.flatnonzero((A[i] != 0) & ~seen):
+            seen[j] = True
+            stack.append(j)
+    return bool(seen.all())
 
 
 def _convert_cliques_to_adjacency(cliques, S):

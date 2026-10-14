@@ -420,16 +420,15 @@ class Gains:
         Returns the same triple as `get_best_gain`.
         """
         key = sep if isinstance(sep, frozenset) else frozenset(sep)
-        gains = self._loglik_cache.get(key)
-        if gains is None:
+        v, gain = self._cached_best(key, outstanding_nodes_mask)
+        if v is None:
             cols = np.asarray(sorted(key), dtype=int)
-            rows = np.setdiff1d(np.arange(self._C.shape[0]), cols)
+            rows = np.setdiff1d(np.flatnonzero(outstanding_nodes_mask), cols)
+            if len(rows) == 0:                       # nothing to attach to this separator
+                return -np.inf, int(np.argmax(outstanding_nodes_mask)), SeparatorWrapper(frozenset(), key)
             g, _ = self._loglik_sweep(rows, cols)
-            gains = np.full(self._C.shape[0], -np.inf)
-            gains[rows] = g
-            self._loglik_cache[key] = gains
-        masked = np.where(outstanding_nodes_mask, gains, -np.inf)
-        v = int(np.argmax(masked))
+            self._store(key, rows, g)
+            v, gain = self._cached_best(key, outstanding_nodes_mask)
         c = len(key)
         if self._accept_all or max(0, min(self._min_clique_size - 1, c)) >= c:
             kept = key                                  # whole separator is used
@@ -440,9 +439,31 @@ class Gains:
                 _, chosen = self._loglik_sweep(np.array([v]), cols)
                 kept = frozenset(int(x) for x in cols[chosen[0]])
                 self._loglik_kept[(key, v)] = kept
-        return float(gains[v]), v, SeparatorWrapper(kept, key)
+        return float(gain), v, SeparatorWrapper(kept, key)
 
-    def _loglik_sweep(self, rows: np.ndarray, cols: np.ndarray):
+    _TOP = 32   # candidates kept per separator (gains do not change during a run)
+
+    def _store(self, key, rows: np.ndarray, gains: np.ndarray) -> None:
+        """Keep the best candidates of a separator, ordered by decreasing gain
+        and increasing node index (the tie-break of argmax)."""
+        finite = np.isfinite(gains)
+        rows, gains = rows[finite], gains[finite]
+        order = np.lexsort((rows, -gains))[: self._TOP]
+        self._loglik_cache[key] = (rows[order], gains[order])
+
+    def _cached_best(self, key, outstanding_nodes_mask: np.ndarray):
+        """Best outstanding candidate from the cache, or (None, None) if the
+        cache is missing or all its candidates have been used."""
+        entry = self._loglik_cache.get(key)
+        if entry is None:
+            return None, None
+        idx, g = entry
+        pos = np.flatnonzero(outstanding_nodes_mask[idx])
+        if pos.size == 0:
+            return None, None
+        return int(idx[pos[0]]), float(g[pos[0]])
+
+    def _loglik_sweep(self, rows: np.ndarray, cols: np.ndarray, cap: Optional[int] = None):
         """
         Greedy subset selection inside `cols` for every node in `rows`.
 
@@ -457,8 +478,9 @@ class Gains:
         """
         C = self._C
         m, c = len(rows), len(cols)
-        k = max(0, min(self._min_clique_size - 1, c))
-        if c and (self._accept_all or k >= c):
+        cap = c if cap is None else min(cap, c)
+        k = max(0, min(self._min_clique_size - 1, cap))
+        if c and cap == c and (self._accept_all or k >= c):
             # every step is accepted, so S is the whole separator: one regression
             fast = self._loglik_full(rows, cols)
             if fast is not None:
@@ -473,7 +495,7 @@ class Gains:
         alive = np.ones(m, dtype=bool)
         chosen = np.zeros((m, c), dtype=bool)
         ar = np.arange(m)
-        for t in range(c):
+        for t in range(cap):
             duu = np.einsum("mii->mi", Mcc)
             valid = active & alive[:, None] & (duu > tol * d0) & (mvv[:, None] > tol * v0[:, None])
             denom = np.where(valid, duu * mvv[:, None], 1.0)
@@ -500,44 +522,63 @@ class Gains:
         gains = np.where(chosen.any(axis=1), -0.5 * np.log(ratio), 0.0)
         return gains, chosen
 
-    def precompute_facets(self, clique: Iterable[int]) -> None:
+    def precompute_facets(self, clique: Iterable[int],
+                          outstanding_nodes_mask: Optional[np.ndarray] = None) -> None:
         """
-        Cache the gains of all facets ``clique - {w}`` from one regression on
-        the clique: dropping `w` raises the residual variance of `v` by
-        ``beta_w^2 / Omega_ww``, with ``Omega = C_QQ^{-1}`` and
-        ``beta = Omega C_Qv``. Used when every facet is taken whole
-        (``threshold <= 0`` or the mandatory picks fill the facet).
+        Cache the gains of all facets ``clique - {w}`` of a full clique.
+
+        - Whole facets (``threshold <= 0`` or mandatory picks fill the facet):
+          one regression on the clique; dropping `w` raises the residual
+          variance of `v` by ``beta_w^2 / Omega_ww``, with
+          ``Omega = C_QQ^{-1}`` and ``beta = Omega C_Qv``.
+        - Otherwise: one greedy sweep over the clique (at most ``|Q| - 1``
+          picks). For a node whose greedy path never picked `w`, the greedy
+          path inside the facet ``Q - {w}`` is identical, so only the nodes
+          that picked `w` are recomputed for that facet.
         """
         if self._gf_type != "loglik":
             return
         q = np.asarray(sorted(clique), dtype=int)
         c = len(q) - 1
-        if c < 1 or not (self._accept_all or max(0, min(self._min_clique_size - 1, c)) >= c):
+        if c < 1:
             return
         C = self._C
-        rows = np.setdiff1d(np.arange(C.shape[0]), q)
+        mask = np.ones(C.shape[0], dtype=bool) if outstanding_nodes_mask is None else outstanding_nodes_mask
+        rows = np.setdiff1d(np.flatnonzero(mask), q)
         if len(rows) == 0:
             return
-        Cqq = C[np.ix_(q, q)]
-        try:
-            L = np.linalg.cholesky(Cqq)
-        except np.linalg.LinAlgError:
+        keys = [frozenset(int(x) for x in q if x != w) for w in q]
+        if all(key in self._loglik_cache for key in keys):
             return
-        if np.min(np.diag(L)) ** 2 <= 1e-12 * np.max(np.diag(Cqq)):
+        whole = self._accept_all or max(0, min(self._min_clique_size - 1, c)) >= c
+        if whole:
+            Cqq = C[np.ix_(q, q)]
+            try:
+                L = np.linalg.cholesky(Cqq)
+            except np.linalg.LinAlgError:
+                return
+            if np.min(np.diag(L)) ** 2 <= 1e-12 * np.max(np.diag(Cqq)):
+                return
+            Omega = np.linalg.inv(Cqq)
+            B = Omega @ C[np.ix_(q, rows)]                      # regression coefficients
+            resid = self._diag[rows] - np.sum(C[np.ix_(q, rows)] * B, axis=0)
+            var = self._diag[rows]
+            for i, key in enumerate(keys):
+                if key in self._loglik_cache:
+                    continue
+                vf = resid + B[i] ** 2 / Omega[i, i]
+                self._store(key, rows, -0.5 * np.log(np.clip(vf / var, 1e-12, 1.0)))
             return
-        Omega = np.linalg.inv(Cqq)
-        B = Omega @ C[np.ix_(q, rows)]                          # regression coefficients
-        resid = self._diag[rows] - np.sum(C[np.ix_(q, rows)] * B, axis=0)
-        var = self._diag[rows]
-        for i, w in enumerate(q):
-            key = frozenset(int(x) for x in q if x != w)
+        g_all, chosen = self._loglik_sweep(rows, q, cap=c)
+        for i, key in enumerate(keys):
             if key in self._loglik_cache:
                 continue
-            vf = resid + B[i] ** 2 / Omega[i, i]
-            gains = np.full(C.shape[0], -np.inf)
-            gains[rows] = -0.5 * np.log(np.clip(vf / var, 1e-12, 1.0))
-            gains[w] = -np.inf                                   # w is in the clique
-            self._loglik_cache[key] = gains
+            g = g_all.copy()
+            redo = chosen[:, i]
+            if redo.any():
+                cols = np.asarray(sorted(key), dtype=int)
+                g[redo], _ = self._loglik_sweep(rows[redo], cols)
+            self._store(key, rows, g)
 
     def _loglik_full(self, rows: np.ndarray, cols: np.ndarray):
         """
@@ -1195,7 +1236,7 @@ class MFCF:
         )
         if clique_size >= self._max_clique_size:
             # exact gain: all facets from one regression on the clique
-            self._gains.precompute_facets(clique)
+            self._gains.precompute_facets(clique, self._outstanding_nodes_mask)
         for facet in facets:
             self._update_pq_for_new_separator(frozenset(facet))
 

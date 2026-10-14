@@ -92,6 +92,9 @@ weight matrix, `run()` returns `None` for the LoGo matrix unless `cov_matrix`
 is given.
 
 ```python
+import numpy as np
+from fast_fast_mfcf import MFCF
+
 # dependency network with statistically validated attachments
 cliques, seps, peo, J = MFCF(max_clique_size=10, acceptance="ftest",
                              alpha=0.01, n_samples=X.shape[0]).run(C=np.corrcoef(X, rowvar=False))
@@ -106,6 +109,8 @@ For likelihood and covariance tasks the builder can take the data matrix
 (observations in rows, e.g. a multivariate time series of returns):
 
 ```python
+from fast_fast_mfcf import MFCF
+
 m = MFCF(max_clique_size=10, acceptance="ftest", alpha=0.01).fit(
     X, shrinkage=0.05, n_effective="auto")
 m.cliques_, m.separators_, m.peo_          # clique forest
@@ -203,18 +208,14 @@ best_params = tuned.estimator_
 ### Hierarchical Clustering with DBHT (`mfcf_dbht()`)
 ```python
 import numpy as np
-from scipy.spatial.distance import pdist, squareform
-from mfcf_dbht import mfcf_dbhts as mfcf_dbht
+from scipy.cluster.hierarchy import fcluster
+from mfcf_dbht import mfcf_dbhts
 
 X = ...  # samples x features
-D = squareform(pdist(X, metric="euclidean"))
-S = np.exp(-D)  # any similarity aligned with D
+S = np.corrcoef(X, rowvar=False)                 # similarity between features
+D = np.sqrt(np.clip(2 * (1 - S), 0, None))       # matching distance
+np.fill_diagonal(D, 0.0)
 
-clusters, Rpm, Adjv, Dpm, Mv, Z = mfcf_dbht(
-    D,
-    S,
-    threshold=0.1,
-    min_clique_size=2,
-    max_clique_size=6,
-)
+T8, Rpm, Adjv, Dpm, Mv, Z = mfcf_dbhts(D, S, min_clique_size=2, max_clique_size=6)
+labels = fcluster(Z, t=4, criterion="maxclust")  # e.g. four clusters
 ```
