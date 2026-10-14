@@ -5,8 +5,14 @@ This module builds a sparse graphical structure (a forest of cliques) from a
 weighted matrix `C` (e.g., correlation or covariance). It greedily grows
 cliques by selecting the next vertex/separator pair that maximizes a gain
 function, while enforcing size and multiplicity constraints on separators.
-Two gains are available: the exact Gaussian log-likelihood gain ("loglik",
-default) and its sum-of-squared-correlations approximation ("sumsquares").
+The builder works on two kinds of input:
+
+* a covariance or correlation matrix, with the exact Gaussian log-likelihood
+  gain ("loglik", default); each greedy step can be accepted by a threshold on
+  the squared partial correlation, a partial F-test or the BIC;
+* a general weight (similarity) matrix, with the sum of squared weights
+  ("sumsquares") or the sum of weights ("sum"); each edge is accepted by a
+  threshold on its (squared) weight.
 
 High level flow:
 1) Seed an initial clique using above-mean edges.
@@ -41,6 +47,7 @@ from typing import FrozenSet, Iterable, List, Optional, Tuple
 
 import numpy as np
 import numpy.linalg as LA
+from scipy import stats
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -147,6 +154,43 @@ def format_frozenset(fs: Iterable[int]) -> str:
 
 
 # =============================================================================
+# Option checks
+# =============================================================================
+GAIN_TYPES = ("loglik", "sumsquares", "sum")
+ACCEPTANCE_RULES = ("threshold", "ftest", "bic")
+
+
+def _check_options(gf_type, acceptance, alpha, n_samples) -> None:
+    if gf_type not in GAIN_TYPES:
+        raise ValueError(f"Unknown gain function type: {gf_type!r}; choose one of {GAIN_TYPES}")
+    if acceptance not in ACCEPTANCE_RULES:
+        raise ValueError(f"Unknown acceptance rule: {acceptance!r}; choose one of {ACCEPTANCE_RULES}")
+    if acceptance != "threshold":
+        if gf_type != "loglik":
+            raise ValueError(
+                f"acceptance={acceptance!r} is a statistical test and requires "
+                "gain_function_type='loglik'; weight gains use acceptance='threshold'"
+            )
+        if n_samples is None or int(n_samples) < 3:
+            raise ValueError(f"acceptance={acceptance!r} requires n_samples (number of observations)")
+        if acceptance == "ftest" and not (0 < alpha < 1):
+            raise ValueError("alpha must be in (0, 1)")
+
+
+def _check_covariance(C: np.ndarray) -> None:
+    msg = ("gain_function_type='loglik' requires a covariance or correlation matrix "
+           "(symmetric, positive semi-definite, positive diagonal); for a general "
+           "weight matrix use gain_function_type='sumsquares' or 'sum'")
+    if C.ndim != 2 or C.shape[0] != C.shape[1] or not np.allclose(C, C.T, atol=1e-10):
+        raise ValueError(msg)
+    if np.any(np.diag(C) <= 0):
+        raise ValueError(msg)
+    ev = np.linalg.eigvalsh((C + C.T) / 2)
+    if ev[0] < -1e-8 * max(ev[-1], 1.0):
+        raise ValueError(msg)
+
+
+# =============================================================================
 # Gains
 # =============================================================================
 class Gains:
@@ -164,10 +208,22 @@ class Gains:
       `v` given the vertices already chosen; a step is kept if that squared
       partial correlation is ``>= threshold`` (the first step uses the plain
       squared correlation, as in "sumsquares").
-    - "sumsquares": the approximation ``sum_{j in S} C[v, j]^2`` over the
-      entries ``C[v, j]^2 >= threshold``.
+    - "sumsquares": ``sum_{j in S} C[v, j]^2`` over the entries
+      ``C[v, j]^2 >= threshold``; `C` may be any weight matrix.
+    - "sum": ``sum_{j in S} C[v, j]`` over the entries ``C[v, j] >= threshold``;
+      for non-negative weight matrices.
 
-    In both cases the top ``min_clique_size - 1`` picks are mandatory.
+    In all cases the top ``min_clique_size - 1`` picks are mandatory.
+
+    Acceptance of each greedy step ("loglik" only; weight gains always use the
+    threshold):
+
+    - "threshold": squared partial correlation ``>= threshold``;
+    - "ftest": partial F-test of the added coefficient at level `alpha`,
+      i.e. ``rho^2 >= F / (F + n - q - 1)`` with ``F`` the ``1 - alpha``
+      quantile of ``F(1, n - q - 1)`` and ``q`` the number of predictors after
+      the step;
+    - "bic": ``n * (-log(1 - rho^2)) > log(n)``.
 
     Parameters
     ----------
@@ -181,8 +237,14 @@ class Gains:
         Minimum size of a clique. When adding a node to separator `S`, we need
         at least `min_clique_size - 1` elements in `S`. If some of the top-k
         edges fall below `threshold`, they are still counted to ensure the size.
-    gf_type : {"loglik", "sumsquares"}, default="loglik"
+    gf_type : {"loglik", "sumsquares", "sum"}, default="loglik"
         Type of gain function.
+    acceptance : {"threshold", "ftest", "bic"}, default="threshold"
+        Rule for accepting each greedy step of the "loglik" gain.
+    alpha : float, default=0.05
+        Level of the partial F-test (acceptance="ftest").
+    n_samples : int, optional
+        Number of observations behind `C`; required by "ftest" and "bic".
 
     Notes
     -----
@@ -197,20 +259,51 @@ class Gains:
         threshold: float = 0.0,
         min_clique_size: int = 1,
         gf_type: str = "loglik",
+        acceptance: str = "threshold",
+        alpha: float = 0.05,
+        n_samples: Optional[int] = None,
     ):
+        _check_options(gf_type, acceptance, alpha, n_samples)
         if gf_type == "sumsquares":
             self._W = np.square(C)
-        elif gf_type == "loglik":
+        elif gf_type == "sum":
+            self._W = np.asarray(C, dtype=float)
+        else:  # "loglik"
             self._C = np.asarray(C, dtype=float)
+            _check_covariance(self._C)
             self._diag = np.diag(self._C).copy()
             self._loglik_cache = {}            # separator -> gains of all nodes
             self._loglik_kept = {}             # (separator, node) -> kept subset
-        else:
-            raise ValueError(f"Unknown gain function type: {gf_type}")
 
         self._gf_type = gf_type
         self._threshold: float = threshold
         self._min_clique_size: int = min_clique_size
+        self._acceptance = acceptance
+        self._alpha = alpha
+        self._n = n_samples
+        # every greedy step accepted: the whole separator is used
+        self._accept_all = acceptance == "threshold" and threshold <= 0
+        self._crit_cache = {}
+
+    def _critical_pc2(self, t: int) -> float:
+        """Smallest squared partial correlation accepted at greedy step `t`
+        (0-based), i.e. with ``q = t + 1`` predictors after the step."""
+        if self._acceptance == "threshold":
+            return self._threshold
+        c = self._crit_cache.get(t)
+        if c is None:
+            n = self._n
+            if self._acceptance == "ftest":
+                df2 = n - (t + 1) - 1
+                if df2 <= 0:
+                    c = np.inf
+                else:
+                    F = stats.f.ppf(1 - self._alpha, 1, df2)
+                    c = F / (F + df2)
+            else:  # "bic"
+                c = -np.expm1(-np.log(n) / n)
+            self._crit_cache[t] = c
+        return c
 
     def get_best_gain(
         self,
@@ -309,7 +402,7 @@ class Gains:
         masked = np.where(outstanding_nodes_mask, gains, -np.inf)
         v = int(np.argmax(masked))
         c = len(key)
-        if self._threshold <= 0 or max(0, min(self._min_clique_size - 1, c)) >= c:
+        if self._accept_all or max(0, min(self._min_clique_size - 1, c)) >= c:
             kept = key                                  # whole separator is used
         else:
             kept = self._loglik_kept.get((key, v))
@@ -336,7 +429,7 @@ class Gains:
         C = self._C
         m, c = len(rows), len(cols)
         k = max(0, min(self._min_clique_size - 1, c))
-        if c and (self._threshold <= 0 or k >= c):
+        if c and (self._accept_all or k >= c):
             # every step is accepted, so S is the whole separator: one regression
             fast = self._loglik_full(rows, cols)
             if fast is not None:
@@ -360,7 +453,7 @@ class Gains:
             best = pc2[ar, j]
             ok = alive & (best >= 0)
             if t >= k:
-                ok &= best >= self._threshold
+                ok &= best >= self._critical_pc2(t)
             alive = ok
             if not ok.any():
                 break
@@ -390,7 +483,7 @@ class Gains:
             return
         q = np.asarray(sorted(clique), dtype=int)
         c = len(q) - 1
-        if c < 1 or not (self._threshold <= 0 or max(0, min(self._min_clique_size - 1, c)) >= c):
+        if c < 1 or not (self._accept_all or max(0, min(self._min_clique_size - 1, c)) >= c):
             return
         C = self._C
         rows = np.setdiff1d(np.arange(C.shape[0]), q)
@@ -562,11 +655,27 @@ class MFCF:
     coordination_number : int or float, default=np.inf
         Maximum multiplicity allowed for any separator (how many times it can be
         recorded/used). Use `np.inf` to disable.
-    gain_function_type : {"loglik", "sumsquares"}, default="loglik"
-        Gain function type: the exact Gaussian log-likelihood gain (default)
-        or the sum-of-squared-correlations approximation. With "loglik" the
-        new-component rule compares the total gain with
-        ``-1/2 log(1 - threshold)``, the gain of a single edge at the threshold.
+    gain_function_type : {"loglik", "sumsquares", "sum"}, default="loglik"
+        "loglik": exact Gaussian log-likelihood gain, for a covariance or
+        correlation matrix `C`. "sumsquares" / "sum": sum of squared weights /
+        of weights, for any weight matrix `C`.
+    acceptance : {"threshold", "ftest", "bic"}, default="threshold"
+        Rule for accepting each greedy attachment step. "threshold" uses
+        `threshold` (squared partial correlation for "loglik", (squared) weight
+        for the weight gains). "ftest" (partial F-test at level `alpha`) and
+        "bic" are statistical validations, available for "loglik" only, and
+        require `n_samples`.
+    alpha : float, default=0.05
+        Level of the partial F-test.
+    n_samples : int, optional
+        Number of observations used to compute `C` ("ftest", "bic").
+
+    Notes
+    -----
+    A vertex starts a new component when no attachment is accepted. With
+    acceptance="threshold" this means a best total gain below `threshold`
+    (weight gains) or below ``-1/2 log(1 - threshold)`` ("loglik", the gain of
+    a single edge at the threshold).
 
     Notes
     -----
@@ -588,13 +697,19 @@ class MFCF:
         max_clique_size: int = 4,
         coordination_number: int = np.inf,
         gain_function_type: str = "loglik",
+        acceptance: str = "threshold",
+        alpha: float = 0.05,
+        n_samples: Optional[int] = None,
     ) -> None:
-
+        _check_options(gain_function_type, acceptance, alpha, n_samples)
         self._threshold = threshold
         self._min_clique_size = min_clique_size
         self._max_clique_size = max_clique_size
         self._coordination_number = coordination_number
         self._gf_type = gain_function_type
+        self._acceptance = acceptance
+        self._alpha = alpha
+        self._n_samples = n_samples
 
     def run(
         self,
@@ -631,19 +746,28 @@ class MFCF:
         - Logging at INFO/DEBUG provides a step-by-step trace.
         """
         self._C = C
-        self._gains = Gains(C, self._threshold, self._min_clique_size, self._gf_type)
+        self._gains = Gains(C, self._threshold, self._min_clique_size, self._gf_type,
+                            self._acceptance, self._alpha, self._n_samples)
         self._gf = self._gains.get_best_gain
         # total-gain threshold for starting a new component, on the gain's scale
-        if self._gf_type == "loglik":
-            self._component_threshold = -0.5 * np.log1p(-min(self._threshold, 1 - 1e-12))
-        else:
+        if self._gf_type != "loglik":
             self._component_threshold = self._threshold
+        elif self._acceptance == "threshold":
+            self._component_threshold = -0.5 * np.log1p(-min(self._threshold, 1 - 1e-12))
+        else:  # statistical acceptance: new component only if nothing is accepted
+            self._component_threshold = 1e-15
 
         self._initialise()
         self._compute_mfcf()
 
         matrix_for_logo = cov_matrix if cov_matrix is not None else C
-        J_logo = self._logo(matrix_for_logo, self._cliques, self._separators_count)
+        try:
+            J_logo = self._logo(matrix_for_logo, self._cliques, self._separators_count)
+        except LA.LinAlgError:
+            # e.g. a general weight matrix: LoGo needs covariance blocks
+            logger.warning("LoGo not computed: clique blocks of the matrix are singular; "
+                           "pass cov_matrix to obtain a precision estimate")
+            J_logo = None
         return self._cliques, self._separators_count, self._peo, J_logo
 
     # -------------------------------------------------------------------------

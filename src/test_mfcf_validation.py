@@ -43,7 +43,7 @@ CASES = list(itertools.product(
     [1, 2, 3],                     # min_clique_size
     [1, 2, np.inf],                # coordination_number
     [0.0, 0.05, 0.2],              # threshold
-    ["loglik", "sumsquares"],      # gain function
+    ["loglik", "sumsquares", "sum"],  # gain function
 ))
 CASES = [c for c in CASES if c[3] <= c[2]]
 
@@ -51,9 +51,15 @@ CASES = [c for c in CASES if c[3] <= c[2]]
 @pytest.mark.parametrize("n,kind,kmax,kmin,c,theta,gain", CASES)
 def test_mfcf_against_independent_reference(n, kind, kmax, kmin, c, theta, gain):
     C = _corr(n, 0, kind)
-    cliques, seps, peo, J = MFCF(threshold=theta, min_clique_size=kmin,
-                                 max_clique_size=kmax, coordination_number=c,
-                                 gain_function_type=gain).run(C)
+    out = MFCF(threshold=theta, min_clique_size=kmin, max_clique_size=kmax,
+               coordination_number=c, gain_function_type=gain).run(C)
+    # with "sum", negative weights fall below a zero threshold: no k-tree guarantee
+    ktree = not (gain == "sum" and C.min() < 0)
+    _check_against_reference(n, C, out, kmax, kmin, c, theta if ktree else 1.0)
+
+
+def _check_against_reference(n, C, out, kmax, kmin, c, theta):
+    cliques, seps, peo, J = out
     cliques = [frozenset(int(v) for v in q) for q in cliques]
     seps = Counter({frozenset(int(v) for v in s): m for s, m in seps.items() if len(s)})
 
@@ -133,3 +139,71 @@ def test_loglik_fixed_size_is_k_tree(k):
     edges = {frozenset(e) for q in cliques for e in itertools.combinations(sorted(q), 2)}
     assert len(edges) == (k - 1) * 30 - k * (k - 1) // 2
     assert all(len(q) == k for q in cliques)
+
+
+
+# --------------------------------------------------------------------------
+# statistical acceptance (loglik gain)
+# --------------------------------------------------------------------------
+STAT_CASES = list(itertools.product([30], ["sector", "signed"], [3, 6], [1, 3],
+                                    [1, np.inf], ["ftest", "bic"]))
+STAT_CASES = [c for c in STAT_CASES if c[3] <= c[2]]
+
+
+@pytest.mark.parametrize("n,kind,kmax,kmin,c,rule", STAT_CASES)
+def test_statistical_acceptance_invariants(n, kind, kmax, kmin, c, rule):
+    C = _corr(n, 0, kind)
+    out = MFCF(min_clique_size=kmin, max_clique_size=kmax, coordination_number=c,
+               acceptance=rule, alpha=0.01, n_samples=3 * n + 20).run(C)
+    _check_against_reference(n, C, out, kmax, kmin, c, theta=1.0)   # theta>0: no k-tree check
+
+
+def _sparse_chordal_sample(p=40, n=200, seed=3):
+    rng = np.random.default_rng(seed)
+    L = np.eye(p)
+    for v in range(1, p):                       # a random tree as precision support
+        L[rng.integers(0, v), v] = rng.choice([-1, 1]) * rng.uniform(0.5, 0.9)
+    X = rng.standard_normal((n, p)) @ np.linalg.inv(L @ L.T + 0 * np.eye(p)).T ** 0
+    S = np.linalg.inv(L @ L.T)
+    X = rng.standard_normal((n, p)) @ np.linalg.cholesky(S).T
+    return np.corrcoef(X, rowvar=False), n
+
+
+def test_ftest_sparsity_decreases_with_alpha():
+    C, n = _sparse_chordal_sample()
+    edges = []
+    for a in (0.2, 0.01, 1e-4):
+        cl, _, _, _ = MFCF(max_clique_size=8, acceptance="ftest", alpha=a, n_samples=n).run(C)
+        edges.append(len({frozenset(e) for q in cl for e in itertools.combinations(sorted(q), 2)}))
+    assert edges[0] >= edges[1] >= edges[2]
+
+
+def test_ftest_rejects_independent_noise():
+    rng = np.random.default_rng(0)
+    C = np.corrcoef(rng.standard_normal((500, 20)), rowvar=False)
+    cl, seps, _, _ = MFCF(max_clique_size=5, acceptance="ftest", alpha=1e-4, n_samples=500).run(C)
+    assert sum(len(q) > 1 for q in cl) <= 1           # (almost) all singletons
+
+
+def test_option_validation():
+    C = _corr(10, 0, "sector")
+    with pytest.raises(ValueError):
+        MFCF(acceptance="ftest")                                  # needs n_samples
+    with pytest.raises(ValueError):
+        MFCF(gain_function_type="sumsquares", acceptance="bic", n_samples=50)
+    with pytest.raises(ValueError):
+        MFCF(gain_function_type="foo")
+    W = np.abs(C) - 0.5                                            # not a covariance
+    np.fill_diagonal(W, 1.0)
+    W[0, 1] = W[1, 0] = 1.5
+    with pytest.raises(ValueError):
+        MFCF().run(W)
+    cl, _, _, _ = MFCF(gain_function_type="sumsquares").run(W)     # weight gains accept it
+    assert sorted({int(v) for q in cl for v in q}) == list(range(10))
+
+
+def test_weight_matrix_without_logo():
+    rng = np.random.default_rng(1)
+    W = rng.uniform(0, 1, (15, 15)); W = (W + W.T) / 2; np.fill_diagonal(W, 0.0)
+    cl, seps, peo, J = MFCF(gain_function_type="sum", max_clique_size=4).run(W)
+    assert sorted(int(v) for v in peo) == list(range(15))

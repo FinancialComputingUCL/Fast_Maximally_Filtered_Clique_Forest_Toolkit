@@ -39,6 +39,10 @@ def mfcf_dbhts(
     min_clique_size: int = 1,
     max_clique_size: int = 4,
     coordination_number: int = np.inf,
+    gain_function_type: str = "loglik",
+    acceptance: str = "threshold",
+    alpha: float = 0.05,
+    n_samples: int = None,
 ):
     """
     Perform Direct Bubble Hierarchical Tree (DBHT) clustering with an
@@ -117,6 +121,10 @@ def mfcf_dbhts(
         min_clique_size=min_clique_size,
         max_clique_size=max_clique_size,
         coordination_number=coordination_number,
+        gain_function_type=gain_function_type,
+        acceptance=acceptance,
+        alpha=alpha,
+        n_samples=n_samples,
     )
     cliques, _, _, _ = builder.run(C=S)
     Rpm = _convert_cliques_to_adjacency(cliques, S)

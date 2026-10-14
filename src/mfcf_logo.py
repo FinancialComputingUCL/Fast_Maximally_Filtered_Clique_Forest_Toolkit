@@ -34,10 +34,18 @@ class MFCFLoGo(EmpiricalCovariance):
     coordination_number : float, default=np.inf
         Maximum allowed uses of a separator (multiplicity cap).
 
-    gain_function_type : {'loglik', 'sumsquares'}, default='loglik'
+    gain_function_type : {'loglik', 'sumsquares', 'sum'}, default='loglik'
         Gain function type to use in MFCF construction. The function is used to
         determine which vertex to add next to maximize the overall gain in the
         graph.
+
+    acceptance : {'threshold', 'ftest', 'bic'}, default='threshold'
+        Rule for accepting each attachment step. 'ftest' (partial F-test at
+        level `alpha`) and 'bic' are statistical validations for the 'loglik'
+        gain; the number of observations is taken from the data.
+
+    alpha : float, default=0.05
+        Level of the partial F-test (acceptance='ftest').
 
     assume_centered : bool, default=False
         If True, data are not centered before computation.
@@ -74,6 +82,8 @@ class MFCFLoGo(EmpiricalCovariance):
         max_clique_size: int = 4,
         coordination_number: int = np.inf,
         gain_function_type: str = "loglik",
+        acceptance: str = "threshold",
+        alpha: float = 0.05,
         assume_centered: bool = False,
     ):
         super().__init__(assume_centered=assume_centered)
@@ -82,6 +92,8 @@ class MFCFLoGo(EmpiricalCovariance):
         self.max_clique_size = max_clique_size
         self.coordination_number = coordination_number
         self.gain_function_type = gain_function_type
+        self.acceptance = acceptance
+        self.alpha = alpha
 
     def fit(self, X: np.ndarray, y=None) -> "MFCFLoGo":
         """Fit the estimator from data X.
@@ -122,6 +134,9 @@ class MFCFLoGo(EmpiricalCovariance):
             max_clique_size=self.max_clique_size,
             coordination_number=self.coordination_number,
             gain_function_type=self.gain_function_type,
+            acceptance=self.acceptance,
+            alpha=self.alpha,
+            n_samples=X.shape[0],
         )
 
         cliques, separators_count, peo, logo = builder.run(C=C)
@@ -216,10 +231,18 @@ class MFCFLoGoCV(EmpiricalCovariance):
     coordination_number : float, default=np.inf
         Maximum allowed uses of a separator (multiplicity cap).
 
-    gain_function_type : {'loglik', 'sumsquares'}, default='loglik'
+    gain_function_type : {'loglik', 'sumsquares', 'sum'}, default='loglik'
         Gain function type to use in MFCF construction. The function is used to
         determine which vertext to add next to maximize the overall gain in the
         graph.
+
+    acceptance : {'threshold', 'ftest', 'bic'}, default='threshold'
+        Rule for accepting each attachment step. 'ftest' (partial F-test at
+        level `alpha`) and 'bic' are statistical validations for the 'loglik'
+        gain; the number of observations is taken from the data.
+
+    alpha : float, default=0.05
+        Level of the partial F-test (acceptance='ftest').
 
     assume_centered : bool, default=False
         If True, data are not centered before computation.
@@ -287,6 +310,8 @@ class MFCFLoGoCV(EmpiricalCovariance):
         min_clique_size: int = 1,
         coordination_number: int = np.inf,
         gain_function_type: str = "loglik",
+        acceptance: str = "threshold",
+        alpha: float = 0.05,
         assume_centered: bool = False,
         # scoring / robustness
         error_score: Union[str, float] = np.nan,
@@ -301,6 +326,8 @@ class MFCFLoGoCV(EmpiricalCovariance):
         self.min_clique_size = min_clique_size
         self.coordination_number = coordination_number
         self.gain_function_type = gain_function_type
+        self.acceptance = acceptance
+        self.alpha = alpha
         self.assume_centered = assume_centered
 
         self.error_score = error_score
@@ -378,6 +405,8 @@ class MFCFLoGoCV(EmpiricalCovariance):
                         max_clique_size=k,
                         coordination_number=self.coordination_number,
                         gain_function_type=self.gain_function_type,
+                        acceptance=self.acceptance,
+                        alpha=self.alpha,
                         assume_centered=self.assume_centered,
                     )
                     base.fit(X_tr)
@@ -438,6 +467,8 @@ class MFCFLoGoCV(EmpiricalCovariance):
             max_clique_size=best_k,
             coordination_number=self.coordination_number,
             gain_function_type=self.gain_function_type,
+            acceptance=self.acceptance,
+            alpha=self.alpha,
             assume_centered=self.assume_centered,
         )
         final.fit(X)
@@ -521,10 +552,18 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
     coordination_number : float, default=np.inf
         Maximum allowed uses of a separator (multiplicity cap).
 
-    gain_function_type : {'loglik', 'sumsquares'}, default='loglik'
+    gain_function_type : {'loglik', 'sumsquares', 'sum'}, default='loglik'
         Gain function type to use in MFCF construction. The function is used to
         determine which vertext to add next to maximize the overall gain in the
         graph.
+
+    acceptance : {'threshold', 'ftest', 'bic'}, default='threshold'
+        Rule for accepting each attachment step. 'ftest' (partial F-test at
+        level `alpha`) and 'bic' are statistical validations for the 'loglik'
+        gain; the number of observations is taken from the data.
+
+    alpha : float, default=0.05
+        Level of the partial F-test (acceptance='ftest').
 
     assume_centered : bool, default=False
         If True, data are not centered before computation.
@@ -596,6 +635,8 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         max_clique_size: int = 4,
         coordination_number: int = np.inf,
         gain_function_type: str = "loglik",
+        acceptance: str = "threshold",
+        alpha: float = 0.05,
         assume_centered: bool = False,
         # scoring / robustness
         error_score: Union[str, float] = np.nan,
@@ -613,6 +654,8 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         self.min_clique_size = min_clique_size
         self.coordination_number = coordination_number
         self.gain_function_type = gain_function_type
+        self.acceptance = acceptance
+        self.alpha = alpha
         self.assume_centered = assume_centered
 
         self.error_score = error_score
@@ -623,9 +666,15 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             min_clique_size=self.min_clique_size,
             max_clique_size=self.max_clique_size,
             coordination_number=self.coordination_number,
+            gain_function_type=self.gain_function_type,
+            acceptance=self.acceptance,
+            alpha=self.alpha,
         )
         if not self.tunable_params:
             return params
+
+        if "alpha" in self.tunable_params:
+            params["alpha"] = trial.suggest_float("alpha", 1e-4, 0.5, log=True)
 
         if "threshold" in self.tunable_params:
             params["threshold"] = trial.suggest_float("threshold", 0.0, 1.0, step=None)
@@ -685,6 +734,9 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             min_clique_size=self.min_clique_size,
             max_clique_size=self.max_clique_size,
             coordination_number=self.coordination_number,
+            gain_function_type=self.gain_function_type,
+            acceptance=self.acceptance,
+            alpha=self.alpha,
         )
         final_params.update(best_params)
         # print(best_params, flush=True)

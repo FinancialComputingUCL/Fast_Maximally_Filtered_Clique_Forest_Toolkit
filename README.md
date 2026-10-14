@@ -49,29 +49,66 @@ cliques, separators, peo, logo = builder.run(C=C, cov_matrix=Cov)
 - `peo`: perfect elimination order collected during growth.
 - `logo`: sparse inverse assembled from clique and separator inverses.
 
-#### Gain functions (`gain_function_type`)
-- `"loglik"` (default): the exact Gaussian log-likelihood gain of attaching a
-  vertex `v` to a subset `S` of a clique, `-1/2 log(1 - R^2_{v|S})`, where
-  `R^2_{v|S}` is the coefficient of determination of the regression of `v` on
-  `S`. `S` is grown greedily, adding at each step the vertex with the largest
-  squared partial correlation with `v`; `threshold` applies to that squared
-  partial correlation (at the first step, the squared correlation). A new
-  component is started when the best total gain is below
-  `-1/2 log(1 - threshold)`, the gain of a single edge at the threshold.
-  `C` must be a correlation (or covariance) matrix.
-- `"sumsquares"`: the approximation `sum_{u in S} C[v, u]^2`, with
-  `threshold` applied to each `C[v, u]^2`. This was the default before
-  version 2026.10 and is kept for backward compatibility.
+#### Two kinds of input
+
+MFCF works either on a **covariance or correlation matrix** (dependency
+networks, precision estimation) or on a **general weight / similarity matrix**
+(network filtering, clustering). The gain and the attachment rule are chosen
+accordingly:
+
+| Input `C` | `gain_function_type` | Gain of attaching `v` to `S` | `acceptance` |
+|---|---|---|---|
+| covariance / correlation | `"loglik"` (default) | exact `-1/2 log(1 - R^2_{v|S})` | `"threshold"`, `"ftest"`, `"bic"` |
+| any weight matrix | `"sumsquares"` | `sum_{u in S} C[v,u]^2` | `"threshold"` |
+| non-negative weight matrix | `"sum"` | `sum_{u in S} C[v,u]` | `"threshold"` |
+
+With `"loglik"`, `S` is grown greedily inside a clique (or facet), adding at
+each step the vertex with the largest squared partial correlation with `v`.
+Each step is accepted by:
+
+- `acceptance="threshold"` (default): squared partial correlation `>= threshold`
+  (at the first step, the squared correlation);
+- `acceptance="ftest"`: partial F-test of the added coefficient at level
+  `alpha`, given `n_samples` observations;
+- `acceptance="bic"`: `n_samples * (-log(1 - rho^2)) > log(n_samples)`.
+
+The statistical rules scale with the sample size and with the number of
+variables already in `S`, so they give a validated, data-driven sparsity. The
+mandatory `min_clique_size - 1` picks bypass the rule. A vertex starts a new
+component when no attachment is accepted.
+
+Because the in-sample likelihood can only grow with `S`, `threshold=0` accepts
+every step: every clique then grows to `max_clique_size`, and the result is the
+fixed-size construction. Variable clique sizes come from `threshold > 0` or a
+statistical rule.
+
+With the weight gains, `threshold` applies to each `C[v,u]^2` ("sumsquares") or
+`C[v,u]` ("sum"), exactly as in earlier versions. `"loglik"` checks that `C` is
+a valid covariance or correlation matrix and raises an error otherwise. For a
+weight matrix, `run()` returns `None` for the LoGo matrix unless `cov_matrix`
+is given.
+
+```python
+# dependency network with statistically validated attachments
+cliques, seps, peo, J = MFCF(max_clique_size=10, acceptance="ftest",
+                             alpha=0.01, n_samples=X.shape[0]).run(C=np.corrcoef(X, rowvar=False))
+# filtering of a general similarity matrix
+cliques, seps, peo, _ = MFCF(gain_function_type="sum", threshold=0.2,
+                             max_clique_size=4).run(C=W)
+```
+
+The LoGo estimators (`MFCFLoGo`, `MFCFLoGoCV`, `MFCFLoGoCVAll`) accept the
+same options and take `n_samples` from the data; `MFCFLoGoCVAll` can tune
+`alpha` (`tunable_params=("alpha", ...)`).
 
 The exact gain measures the conditional information that an attachment adds,
 so it selects sparser and more accurate networks when the dependence structure
-is sparse; on dense data the two gains perform similarly. Gains are cached per
-separator and, for fixed clique sizes, all facets of a clique are scored from a
-single regression, so the exact gain runs at a cost comparable to the
-approximation (faster for fixed clique sizes). `mfcf_dbht()` and the LoGo
-estimators use the same default.
-To reproduce results obtained with earlier versions, pass
-`gain_function_type="sumsquares"`.
+is sparse; on dense data the two covariance-based options perform similarly.
+Gains are cached per separator, and for fixed clique sizes all facets of a
+clique are scored from a single regression, so the exact gain runs at a cost
+comparable to the approximation (faster for fixed clique sizes). To reproduce
+results of earlier versions, pass `gain_function_type="sumsquares"`, the
+former default.
 
 ### Precision Estimation (`MFCFLoGO()`)
 ```python
