@@ -265,6 +265,10 @@ def test_effective_sample_size():
     assert abs(neff / (n * (1 - phi**2) / (1 + phi**2)) - 1) < 0.15
 
 
-def test_fit_rejects_weight_gain():
+def test_fit_with_weight_gains():
+    X = _data()
+    m = MFCF(gain_function_type="sumsquares", max_clique_size=4).fit(X)       # original construction
+    cl, _, _, _ = MFCF(gain_function_type="sumsquares", max_clique_size=4).run(np.corrcoef(X, rowvar=False))
+    assert {frozenset(q) for q in m.cliques_} == {frozenset(q) for q in cl}
     with pytest.raises(ValueError):
-        MFCF(gain_function_type="sumsquares").fit(_data())
+        MFCF(gain_function_type="sum").fit(X)            # signed correlations are not non-negative weights

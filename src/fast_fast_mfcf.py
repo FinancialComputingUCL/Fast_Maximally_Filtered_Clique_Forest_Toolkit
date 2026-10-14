@@ -836,16 +836,15 @@ class MFCF:
 
         Notes
         -----
-        The structure is built from the sample correlation, so it does not
-        depend on the scales of the variables. The precision is the LoGo
+        The structure is built from the sample correlation with the chosen
+        gain ("loglik", or "sumsquares" for the original sum-of-squared-
+        correlations construction; "sum" requires non-negative correlations),
+        so it does not depend on the scales of the variables. The precision is the LoGo
         assembly of the (shrunk) correlation blocks, rescaled by the sample
         standard deviations: ``precision_ = D^{-1} J_R D^{-1}``. With
         ``shrinkage=0`` and clique blocks of full rank it is the maximum
         likelihood estimate for the decomposable model.
         """
-        if self._gf_type != "loglik":
-            raise ValueError("fit(X) builds a likelihood model and requires gain_function_type='loglik'; "
-                             "for a weight matrix use run(C)")
         X = np.asarray(X, dtype=float)
         if X.ndim != 2 or X.shape[0] < 3:
             raise ValueError("X must be an (n_samples, n_features) array with n_samples >= 3")

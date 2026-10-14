@@ -152,3 +152,85 @@ def test_dbht(gain):
     labels = fcluster(Z, 4, "maxclust")
     # each planted group falls in a single cluster
     assert all(len(set(labels[groups == k])) == 1 for k in range(4))
+
+
+# ---------------------------------------------------- error and fallback paths
+def test_invalid_options():
+    C = np.corrcoef(_data(), rowvar=False)
+    with pytest.raises(ValueError):
+        MFCF(acceptance="aic")
+    with pytest.raises(ValueError):
+        MFCF(acceptance="ftest", alpha=1.5).run(C)
+    with pytest.raises(ValueError):
+        MFCF().fit(_data(), shrinkage=1.0)
+    with pytest.raises(ValueError):
+        MFCF(acceptance="bic").fit(_data(n=50), n_effective=500)
+
+
+def test_ftest_with_too_few_observations():
+    """Zero residual degrees of freedom: no attachment beyond the mandatory picks."""
+    C = np.corrcoef(_data(n=200, p=12), rowvar=False)
+    cl, seps, peo, _ = MFCF(max_clique_size=8, acceptance="ftest", n_samples=4).run(C)
+    assert sorted(int(v) for v in peo) == list(range(12))
+    assert max(len(q) for q in cl) <= 3
+
+
+def test_singular_blocks_fall_back():
+    """Duplicated columns make clique blocks singular: the closed-form shortcuts
+    must fall back to the sweep, and an impossible LoGo is reported as None."""
+    X = _data(n=100, p=8)
+    X = np.hstack([X, X[:, :3]])
+    C = np.corrcoef(X, rowvar=False)
+    cl, seps, peo, J = MFCF(min_clique_size=4, max_clique_size=4).run(C, cov_matrix=np.eye(11))
+    _valid(cl, 11, 4)
+    W = np.ones((6, 6))                                   # weights with singular blocks
+    cl, seps, peo, J = MFCF(gain_function_type="sum", max_clique_size=3).run(W)
+    assert J is None
+    m = MFCF(max_clique_size=8).fit(_data(n=5, p=10))     # n < clique size, no shrinkage
+    assert m.precision_ is None or np.all(np.isfinite(m.precision_))
+
+
+def test_separator_wrapper_ordering():
+    from fast_fast_mfcf import SeparatorWrapper
+    a = SeparatorWrapper(frozenset({1}), frozenset({1, 2}))
+    b = SeparatorWrapper(frozenset({1, 3}), frozenset({1, 2, 3}))
+    assert a < b and b > a and a <= b and b >= a and not a == b
+    assert (a.__eq__(1)) is NotImplemented
+
+
+def test_debug_logging_runs(caplog):
+    import logging
+    C = np.corrcoef(_data(p=10), rowvar=False)
+    with caplog.at_level(logging.DEBUG, logger="fast_fast_mfcf"):
+        MFCF(max_clique_size=3, acceptance="bic", n_samples=200).run(C)
+        MFCF(max_clique_size=3, gain_function_type="sumsquares", threshold=0.1, coordination_number=1).run(C)
+    assert any("Added vertex" in r.getMessage() for r in caplog.records)
+
+
+# ------------------------------------------------------ cross-validated tuning
+def test_mfcflogocvall_tunes_all_parameters():
+    pytest.importorskip("sklearn")
+    optuna = pytest.importorskip("optuna")
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    from mfcf_logo import MFCFLoGoCVAll
+    X = _data(n=240, p=12)
+    for tunable, kw in [(("threshold", "max_clique_size", "min_clique_size", "coordination_number"), dict()),
+                        (("alpha", "max_clique_size"), dict(acceptance="ftest", shrinkage=0.05)),
+                        (("min_clique_size",), dict(gain_function_type="sumsquares")),
+                        ((), dict())]:
+        est = MFCFLoGoCVAll(tunable_params=tunable, n_trials=4, cv=3, random_state=0, **kw).fit(X)
+        assert np.all(np.isfinite(est.precision_))
+        assert np.allclose(np.linalg.inv(est.precision_), est.covariance_, atol=1e-6)
+        est.get_precision(); est.get_covariance()
+
+
+def test_cv_handles_failing_fits():
+    pytest.importorskip("sklearn")
+    pytest.importorskip("optuna")
+    from mfcf_logo import MFCFLoGo, MFCFLoGoCV
+    X = _data(n=30, p=12)
+    cv = MFCFLoGoCV(max_clique_size_grid=[2, 4, 25], cv=3).fit(X)    # 25 > training size
+    assert cv.best_max_clique_size_ in (2, 4, 25)
+    assert np.all(np.isfinite(cv.precision_))
+    m = MFCFLoGo(max_clique_size=3).fit(X)
+    assert m.get_precision().shape == (12, 12) and m.get_covariance().shape == (12, 12)

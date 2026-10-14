@@ -22,8 +22,10 @@ jobs:
               found=1
               PYTHONPATH="$dir" python -m pytest -q "$dir/test_mfcf_validation.py"
             fi
-            if [ -f "$dir/test_mfcf_robustness.py" ]; then
-              PYTHONPATH="$dir" python -m pytest -q "$dir/test_mfcf_robustness.py"
-            fi
+            for extra in test_mfcf_robustness.py test_mfcf_properties.py; do
+              if [ -f "$dir/$extra" ]; then
+                PYTHONPATH="$dir" python -m pytest -q "$dir/$extra"
+              fi
+            done
           done
           test "$found" -eq 1

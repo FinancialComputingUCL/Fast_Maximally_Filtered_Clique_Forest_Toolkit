@@ -740,7 +740,8 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             # )
             est = MFCFLoGo(**params, assume_centered=self.assume_centered)
 
-            cv = KFold(n_splits=5, shuffle=self.shuffle, random_state=self.random_state)
+            cv = KFold(n_splits=self.cv, shuffle=self.shuffle,
+                       random_state=self.random_state if self.shuffle else None)
             scores = cross_val_score(
                 est, X, y=None, scoring=log_likelihood_scorer, cv=cv, n_jobs=self.n_jobs
             )

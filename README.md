@@ -125,7 +125,9 @@ m.n_effective_                            # observations used by the test
   autocorrelations; a number can also be given.
 - Assumptions: approximately stationary series over the sample (use returns,
   not prices). Data preparation (missing values, windows) is left to the user.
-- `fit(X)` requires the `"loglik"` gain; for weight matrices use `run(C)`.
+- `fit(X)` works with the `"loglik"` gain (default) or `"sumsquares"` (the
+  original construction on the correlation matrix); for other weight
+  matrices use `run(C)`.
 
 The LoGo estimators (`MFCFLoGo`, `MFCFLoGoCV`, `MFCFLoGoCVAll`) are built on
 `fit(X)` and accept the same options (`acceptance`, `alpha`, `shrinkage`,
