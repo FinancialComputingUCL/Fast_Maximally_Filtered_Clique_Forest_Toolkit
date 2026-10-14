@@ -382,6 +382,7 @@ def test_kendall_tau_b_matches_scipy_with_ties():
     rng = np.random.default_rng(3)
     X = np.round(rng.standard_normal((57, 5)), 1)              # many ties
     T = _kendall_tau_b(X, block=7)
+    np.testing.assert_allclose(_kendall_tau_b(X, gram_max_n=10), T, atol=1e-12)   # pairwise path
     for i in range(5):
         for j in range(5):
             ref = 1.0 if i == j else stats.kendalltau(X[:, i], X[:, j]).statistic

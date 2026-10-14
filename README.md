@@ -134,8 +134,9 @@ m.n_effective_                            # observations used by the test
   definite matrices if needed). The structure is then invariant to monotone
   transformations of the variables and robust to heavy tails and outliers
   (e.g. daily returns); the statistical tests hold approximately. Spearman
-  costs about the same as Pearson; Kendall costs O(n^2 p^2) (about 3 s for
-  n = 2000, p = 200).
+  costs about the same as Pearson and is the choice for long series; Kendall
+  costs O(p^2 n log n) (about 4 s for p = 50, n = 20000; 0.03 s with
+  Spearman).
 - Assumptions: approximately stationary series over the sample (use returns,
   not prices). Data preparation (missing values, windows) is left to the user.
 - `fit(X)` works with the `"loglik"` gain (default) or `"sumsquares"` (the

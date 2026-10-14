@@ -201,10 +201,20 @@ def _check_nonnegative(W: np.ndarray) -> None:
         )
 
 
-def _kendall_tau_b(X: np.ndarray, block: int = 256) -> np.ndarray:
-    """Kendall's tau-b for all pairs of columns, as a normalised Gram matrix of
-    pairwise sign differences (O(n^2 p^2) operations, O(block n p) memory)."""
+def _kendall_tau_b(X: np.ndarray, block: int = 256, gram_max_n: int = 2000) -> np.ndarray:
+    """Kendall's tau-b for all pairs of columns. Short series (n <= gram_max_n):
+    normalised Gram matrix of pairwise sign differences (O(n^2 p^2) operations
+    in BLAS, O(block n p) memory). Long series: Knight's O(n log n) algorithm
+    for each pair (scipy)."""
     n, p = X.shape
+    if np.any(np.ptp(X, axis=0) == 0):
+        raise ValueError("X has constant columns")
+    if n > gram_max_n:
+        T = np.eye(p)
+        for i in range(p):
+            for j in range(i):
+                T[i, j] = T[j, i] = stats.kendalltau(X[:, i], X[:, j]).statistic
+        return T
     G = np.zeros((p, p))
     for k0 in range(0, n - 1, block):
         rows = range(k0, min(k0 + block, n - 1))
@@ -926,8 +936,9 @@ class MFCF:
             (Kendall), projected onto the positive definite matrices if
             needed; they are invariant to monotone transformations of the
             variables and robust to heavy tails and outliers. The statistical
-            acceptance rules then hold approximately. "kendall" costs
-            O(n^2 p^2) operations.
+            acceptance rules then hold approximately. "spearman" costs about
+            as much as "pearson" and is recommended for long series; "kendall"
+            costs O(p^2 n log n) (a few seconds for p = 50, n = 20000).
 
         Returns
         -------
