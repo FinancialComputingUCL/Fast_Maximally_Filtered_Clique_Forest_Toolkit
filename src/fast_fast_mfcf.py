@@ -4,8 +4,9 @@ Maximum Filtering Clique Forest (MFCF)
 This module builds a sparse graphical structure (a forest of cliques) from a
 weighted matrix `C` (e.g., correlation or covariance). It greedily grows
 cliques by selecting the next vertex/separator pair that maximizes a gain
-function (currently: sum of squared weights), while enforcing size and
-multiplicity constraints on separators.
+function, while enforcing size and multiplicity constraints on separators.
+Two gains are available: the exact Gaussian log-likelihood gain ("loglik",
+default) and its sum-of-squared-correlations approximation ("sumsquares").
 
 High level flow:
 1) Seed an initial clique using above-mean edges.
@@ -152,10 +153,21 @@ class Gains:
     """
     Gain function handler.
 
-    Currently implements the "sumsquares" gain: for a candidate node `i` and
-    separator `S`, the gain is the sum of squared weights `C[i, j]^2` over
-    `j in S` that are above a threshold, with optional mandatory top-k picks to
-    satisfy a minimum clique size.
+    Two gains are implemented for a candidate node `v` attached to a subset `S`
+    of a separator (or clique) candidate:
+
+    - "loglik" (default): the exact Gaussian log-likelihood gain per
+      observation, ``g = -1/2 log(1 - R^2_{v|S})``, where ``R^2_{v|S}`` is the
+      coefficient of determination of the regression of `v` on `S` computed
+      from `C`. `S` is grown greedily inside the candidate separator, adding at
+      each step the vertex with the largest squared partial correlation with
+      `v` given the vertices already chosen; a step is kept if that squared
+      partial correlation is ``>= threshold`` (the first step uses the plain
+      squared correlation, as in "sumsquares").
+    - "sumsquares": the approximation ``sum_{j in S} C[v, j]^2`` over the
+      entries ``C[v, j]^2 >= threshold``.
+
+    In both cases the top ``min_clique_size - 1`` picks are mandatory.
 
     Parameters
     ----------
@@ -169,12 +181,14 @@ class Gains:
         Minimum size of a clique. When adding a node to separator `S`, we need
         at least `min_clique_size - 1` elements in `S`. If some of the top-k
         edges fall below `threshold`, they are still counted to ensure the size.
-    gf_type : {"sumsquares"}, default="sumsquares"
-        Type of gain function. Only "sumsquares" is supported.
+    gf_type : {"loglik", "sumsquares"}, default="loglik"
+        Type of gain function.
 
     Notes
     -----
-    The handler precomputes `W = C ** 2` for efficient vectorized scoring.
+    "loglik" requires `C` to be a correlation or covariance matrix; it is
+    evaluated for all outstanding nodes at once by sequential sweeps of the
+    conditional covariance. "sumsquares" precomputes `W = C ** 2`.
     """
 
     def __init__(
@@ -182,13 +196,19 @@ class Gains:
         C: np.ndarray,
         threshold: float = 0.0,
         min_clique_size: int = 1,
-        gf_type: str = "sumsquares",
+        gf_type: str = "loglik",
     ):
         if gf_type == "sumsquares":
             self._W = np.square(C)
+        elif gf_type == "loglik":
+            self._C = np.asarray(C, dtype=float)
+            self._diag = np.diag(self._C).copy()
+            self._loglik_cache = {}            # separator -> gains of all nodes
+            self._loglik_kept = {}             # (separator, node) -> kept subset
         else:
             raise ValueError(f"Unknown gain function type: {gf_type}")
 
+        self._gf_type = gf_type
         self._threshold: float = threshold
         self._min_clique_size: int = min_clique_size
 
@@ -234,6 +254,9 @@ class Gains:
             empty = frozenset()
             return 0.0, first, SeparatorWrapper(empty, empty)
 
+        if self._gf_type == "loglik":
+            return self._best_gain_loglik(outstanding_nodes_mask, sep)
+
         # 1) Prepare indices/submatrix and mandatory-picks k
         rows, cols, W_sub = self._prepare_submatrix(outstanding_nodes_mask, sep)
 
@@ -258,6 +281,164 @@ class Gains:
         )
 
         return best_gain, best_node, best_sep
+
+    def _best_gain_loglik(
+        self,
+        outstanding_nodes_mask: np.ndarray,
+        sep: "Separator",
+    ) -> Tuple[float, "Node", "SeparatorWrapper"]:
+        """
+        Exact log-likelihood gain for the best outstanding node.
+
+        The gain of a (separator, node) pair does not change during a run, so
+        the gains of all nodes for a separator are computed once and cached;
+        later calls only mask the nodes that are no longer outstanding. The
+        kept subset is reconstructed for the selected node only.
+
+        Returns the same triple as `get_best_gain`.
+        """
+        key = sep if isinstance(sep, frozenset) else frozenset(sep)
+        gains = self._loglik_cache.get(key)
+        if gains is None:
+            cols = np.asarray(sorted(key), dtype=int)
+            rows = np.setdiff1d(np.arange(self._C.shape[0]), cols)
+            g, _ = self._loglik_sweep(rows, cols)
+            gains = np.full(self._C.shape[0], -np.inf)
+            gains[rows] = g
+            self._loglik_cache[key] = gains
+        masked = np.where(outstanding_nodes_mask, gains, -np.inf)
+        v = int(np.argmax(masked))
+        c = len(key)
+        if self._threshold <= 0 or max(0, min(self._min_clique_size - 1, c)) >= c:
+            kept = key                                  # whole separator is used
+        else:
+            kept = self._loglik_kept.get((key, v))
+            if kept is None:
+                cols = np.asarray(sorted(key), dtype=int)
+                _, chosen = self._loglik_sweep(np.array([v]), cols)
+                kept = frozenset(int(x) for x in cols[chosen[0]])
+                self._loglik_kept[(key, v)] = kept
+        return float(gains[v]), v, SeparatorWrapper(kept, key)
+
+    def _loglik_sweep(self, rows: np.ndarray, cols: np.ndarray):
+        """
+        Greedy subset selection inside `cols` for every node in `rows`.
+
+        At each step the vertex `u` with the largest squared partial
+        correlation ``rho^2_{vu|S}`` is added and the conditional covariance is
+        updated by a sweep, so that ``1 - R^2_{v|S}`` is exact. A step is kept
+        if it is one of the mandatory ``min_clique_size - 1`` picks or if
+        ``rho^2_{vu|S} >= threshold``; once a step is rejected, growth stops.
+
+        Returns the gains ``-1/2 log(1 - R^2_{v|S})`` and the boolean matrix
+        of chosen columns.
+        """
+        C = self._C
+        m, c = len(rows), len(cols)
+        k = max(0, min(self._min_clique_size - 1, c))
+        if c and (self._threshold <= 0 or k >= c):
+            # every step is accepted, so S is the whole separator: one regression
+            fast = self._loglik_full(rows, cols)
+            if fast is not None:
+                return fast
+        Mcc = np.broadcast_to(C[np.ix_(cols, cols)], (m, c, c)).copy()  # cov(u, w | S)
+        mvc = C[np.ix_(rows, cols)].copy()                                # cov(v, u | S)
+        mvv = self._diag[rows].copy()                                     # var(v | S)
+        v0 = mvv.copy()
+        d0 = self._diag[cols]
+        tol = 1e-12
+        active = np.ones((m, c), dtype=bool)
+        alive = np.ones(m, dtype=bool)
+        chosen = np.zeros((m, c), dtype=bool)
+        ar = np.arange(m)
+        for t in range(c):
+            duu = np.einsum("mii->mi", Mcc)
+            valid = active & alive[:, None] & (duu > tol * d0) & (mvv[:, None] > tol * v0[:, None])
+            denom = np.where(valid, duu * mvv[:, None], 1.0)
+            pc2 = np.where(valid, mvc ** 2 / denom, -1.0)
+            j = np.argmax(pc2, axis=1)
+            best = pc2[ar, j]
+            ok = alive & (best >= 0)
+            if t >= k:
+                ok &= best >= self._threshold
+            alive = ok
+            if not ok.any():
+                break
+            r = np.flatnonzero(ok)
+            jj = j[r]
+            chosen[r, jj] = True
+            col = Mcc[r, :, jj]                       # cov(., u* | S), shape (len(r), c)
+            dvar = col[np.arange(len(r)), jj]
+            cv = mvc[r, jj]
+            Mcc[r] -= col[:, :, None] * col[:, None, :] / dvar[:, None, None]
+            mvc[r] -= cv[:, None] * col / dvar[:, None]
+            mvv[r] -= cv ** 2 / dvar
+            active[r, jj] = False
+        ratio = np.clip(mvv / v0, tol, 1.0)
+        gains = np.where(chosen.any(axis=1), -0.5 * np.log(ratio), 0.0)
+        return gains, chosen
+
+    def precompute_facets(self, clique: Iterable[int]) -> None:
+        """
+        Cache the gains of all facets ``clique - {w}`` from one regression on
+        the clique: dropping `w` raises the residual variance of `v` by
+        ``beta_w^2 / Omega_ww``, with ``Omega = C_QQ^{-1}`` and
+        ``beta = Omega C_Qv``. Used when every facet is taken whole
+        (``threshold <= 0`` or the mandatory picks fill the facet).
+        """
+        if self._gf_type != "loglik":
+            return
+        q = np.asarray(sorted(clique), dtype=int)
+        c = len(q) - 1
+        if c < 1 or not (self._threshold <= 0 or max(0, min(self._min_clique_size - 1, c)) >= c):
+            return
+        C = self._C
+        rows = np.setdiff1d(np.arange(C.shape[0]), q)
+        if len(rows) == 0:
+            return
+        Cqq = C[np.ix_(q, q)]
+        try:
+            L = np.linalg.cholesky(Cqq)
+        except np.linalg.LinAlgError:
+            return
+        if np.min(np.diag(L)) ** 2 <= 1e-12 * np.max(np.diag(Cqq)):
+            return
+        Omega = np.linalg.inv(Cqq)
+        B = Omega @ C[np.ix_(q, rows)]                          # regression coefficients
+        resid = self._diag[rows] - np.sum(C[np.ix_(q, rows)] * B, axis=0)
+        var = self._diag[rows]
+        for i, w in enumerate(q):
+            key = frozenset(int(x) for x in q if x != w)
+            if key in self._loglik_cache:
+                continue
+            vf = resid + B[i] ** 2 / Omega[i, i]
+            gains = np.full(C.shape[0], -np.inf)
+            gains[rows] = -0.5 * np.log(np.clip(vf / var, 1e-12, 1.0))
+            gains[w] = -np.inf                                   # w is in the clique
+            self._loglik_cache[key] = gains
+
+    def _loglik_full(self, rows: np.ndarray, cols: np.ndarray):
+        """
+        Gain when the whole separator is used: ``R^2_{v|S}`` from one solve for
+        all nodes. Returns None if the separator block is numerically singular,
+        in which case the sweep handles the degenerate directions.
+        """
+        C = self._C
+        Css = C[np.ix_(cols, cols)]
+        Csv = C[np.ix_(cols, rows)]
+        try:
+            L = np.linalg.cholesky(Css)
+        except np.linalg.LinAlgError:
+            return None
+        if np.min(np.diag(L)) ** 2 <= 1e-12 * np.max(np.diag(Css)):
+            return None
+        Y = np.linalg.solve(L, Csv)                     # L^{-1} C_{S v}
+        explained = np.sum(Y * Y, axis=0)               # C_vS C_SS^{-1} C_Sv
+        var = self._diag[rows]
+        ratio = np.clip(1.0 - explained / var, 1e-12, 1.0)
+        gains = -0.5 * np.log(ratio)
+        chosen = np.ones((len(rows), len(cols)), dtype=bool)
+        return gains, chosen
 
     # --------------------
     # Helpers
@@ -381,8 +562,11 @@ class MFCF:
     coordination_number : int or float, default=np.inf
         Maximum multiplicity allowed for any separator (how many times it can be
         recorded/used). Use `np.inf` to disable.
-    gain_function_type : {"sumsquares"}, default="sumsquares"
-        Gain function type; currently only "sumsquares" is supported.
+    gain_function_type : {"loglik", "sumsquares"}, default="loglik"
+        Gain function type: the exact Gaussian log-likelihood gain (default)
+        or the sum-of-squared-correlations approximation. With "loglik" the
+        new-component rule compares the total gain with
+        ``-1/2 log(1 - threshold)``, the gain of a single edge at the threshold.
 
     Notes
     -----
@@ -403,7 +587,7 @@ class MFCF:
         min_clique_size: int = 1,
         max_clique_size: int = 4,
         coordination_number: int = np.inf,
-        gain_function_type: str = "sumsquares",
+        gain_function_type: str = "loglik",
     ) -> None:
 
         self._threshold = threshold
@@ -447,9 +631,13 @@ class MFCF:
         - Logging at INFO/DEBUG provides a step-by-step trace.
         """
         self._C = C
-        self._gf = Gains(
-            C, self._threshold, self._min_clique_size, self._gf_type
-        ).get_best_gain
+        self._gains = Gains(C, self._threshold, self._min_clique_size, self._gf_type)
+        self._gf = self._gains.get_best_gain
+        # total-gain threshold for starting a new component, on the gain's scale
+        if self._gf_type == "loglik":
+            self._component_threshold = -0.5 * np.log1p(-min(self._threshold, 1 - 1e-12))
+        else:
+            self._component_threshold = self._threshold
 
         self._initialise()
         self._compute_mfcf()
@@ -628,7 +816,7 @@ class MFCF:
         `self._threshold` to decide if we start a new component.
         """
         pos_gain = -gain  # negate back to positive for threshold compare
-        if pos_gain < self._threshold:
+        if pos_gain < self._component_threshold:
             # start a new clique
             v = int(self._outstanding_nodes_mask.argmax())
             sep = frozenset()
@@ -755,6 +943,9 @@ class MFCF:
             if clique_size < self._max_clique_size
             else list(itertools.combinations(clique, clique_size - 1))
         )
+        if clique_size >= self._max_clique_size:
+            # exact gain: all facets from one regression on the clique
+            self._gains.precompute_facets(clique)
         for facet in facets:
             self._update_pq_for_new_separator(frozenset(facet))
 

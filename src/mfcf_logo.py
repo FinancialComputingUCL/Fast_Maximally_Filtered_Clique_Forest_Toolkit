@@ -34,7 +34,7 @@ class MFCFLoGo(EmpiricalCovariance):
     coordination_number : float, default=np.inf
         Maximum allowed uses of a separator (multiplicity cap).
 
-    gain_function_type : {'sumsquares'}, default='sumsquares'
+    gain_function_type : {'loglik', 'sumsquares'}, default='loglik'
         Gain function type to use in MFCF construction. The function is used to
         determine which vertex to add next to maximize the overall gain in the
         graph.
@@ -73,7 +73,7 @@ class MFCFLoGo(EmpiricalCovariance):
         min_clique_size: int = 1,
         max_clique_size: int = 4,
         coordination_number: int = np.inf,
-        gain_function_type: str = "sumsquares",
+        gain_function_type: str = "loglik",
         assume_centered: bool = False,
     ):
         super().__init__(assume_centered=assume_centered)
@@ -216,7 +216,7 @@ class MFCFLoGoCV(EmpiricalCovariance):
     coordination_number : float, default=np.inf
         Maximum allowed uses of a separator (multiplicity cap).
 
-    gain_function_type : {'sumsquares'}, default='sumsquares'
+    gain_function_type : {'loglik', 'sumsquares'}, default='loglik'
         Gain function type to use in MFCF construction. The function is used to
         determine which vertext to add next to maximize the overall gain in the
         graph.
@@ -286,7 +286,7 @@ class MFCFLoGoCV(EmpiricalCovariance):
         threshold: float = 0.0,
         min_clique_size: int = 1,
         coordination_number: int = np.inf,
-        gain_function_type: str = "sumsquares",
+        gain_function_type: str = "loglik",
         assume_centered: bool = False,
         # scoring / robustness
         error_score: Union[str, float] = np.nan,
@@ -521,7 +521,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
     coordination_number : float, default=np.inf
         Maximum allowed uses of a separator (multiplicity cap).
 
-    gain_function_type : {'sumsquares'}, default='sumsquares'
+    gain_function_type : {'loglik', 'sumsquares'}, default='loglik'
         Gain function type to use in MFCF construction. The function is used to
         determine which vertext to add next to maximize the overall gain in the
         graph.
@@ -595,7 +595,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         min_clique_size: int = 1,
         max_clique_size: int = 4,
         coordination_number: int = np.inf,
-        gain_function_type: str = "sumsquares",
+        gain_function_type: str = "loglik",
         assume_centered: bool = False,
         # scoring / robustness
         error_score: Union[str, float] = np.nan,

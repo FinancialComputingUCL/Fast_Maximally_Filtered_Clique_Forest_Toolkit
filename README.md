@@ -49,6 +49,30 @@ cliques, separators, peo, logo = builder.run(C=C, cov_matrix=Cov)
 - `peo`: perfect elimination order collected during growth.
 - `logo`: sparse inverse assembled from clique and separator inverses.
 
+#### Gain functions (`gain_function_type`)
+- `"loglik"` (default): the exact Gaussian log-likelihood gain of attaching a
+  vertex `v` to a subset `S` of a clique, `-1/2 log(1 - R^2_{v|S})`, where
+  `R^2_{v|S}` is the coefficient of determination of the regression of `v` on
+  `S`. `S` is grown greedily, adding at each step the vertex with the largest
+  squared partial correlation with `v`; `threshold` applies to that squared
+  partial correlation (at the first step, the squared correlation). A new
+  component is started when the best total gain is below
+  `-1/2 log(1 - threshold)`, the gain of a single edge at the threshold.
+  `C` must be a correlation (or covariance) matrix.
+- `"sumsquares"`: the approximation `sum_{u in S} C[v, u]^2`, with
+  `threshold` applied to each `C[v, u]^2`. This was the default before
+  version 2026.10 and is kept for backward compatibility.
+
+The exact gain measures the conditional information that an attachment adds,
+so it selects sparser and more accurate networks when the dependence structure
+is sparse; on dense data the two gains perform similarly. Gains are cached per
+separator and, for fixed clique sizes, all facets of a clique are scored from a
+single regression, so the exact gain runs at a cost comparable to the
+approximation (faster for fixed clique sizes). `mfcf_dbht()` and the LoGo
+estimators use the same default.
+To reproduce results obtained with earlier versions, pass
+`gain_function_type="sumsquares"`.
+
 ### Precision Estimation (`MFCFLoGO()`)
 ```python
 import numpy as np

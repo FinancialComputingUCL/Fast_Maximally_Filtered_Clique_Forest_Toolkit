@@ -11,7 +11,7 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from fast_fast_mfcf import MFCF
+from fast_fast_mfcf import MFCF, Gains
 
 
 def _corr(n_vars, seed, kind):
@@ -43,15 +43,17 @@ CASES = list(itertools.product(
     [1, 2, 3],                     # min_clique_size
     [1, 2, np.inf],                # coordination_number
     [0.0, 0.05, 0.2],              # threshold
+    ["loglik", "sumsquares"],      # gain function
 ))
 CASES = [c for c in CASES if c[3] <= c[2]]
 
 
-@pytest.mark.parametrize("n,kind,kmax,kmin,c,theta", CASES)
-def test_mfcf_against_independent_reference(n, kind, kmax, kmin, c, theta):
+@pytest.mark.parametrize("n,kind,kmax,kmin,c,theta,gain", CASES)
+def test_mfcf_against_independent_reference(n, kind, kmax, kmin, c, theta, gain):
     C = _corr(n, 0, kind)
     cliques, seps, peo, J = MFCF(threshold=theta, min_clique_size=kmin,
-                                 max_clique_size=kmax, coordination_number=c).run(C)
+                                 max_clique_size=kmax, coordination_number=c,
+                                 gain_function_type=gain).run(C)
     cliques = [frozenset(int(v) for v in q) for q in cliques]
     seps = Counter({frozenset(int(v) for v in s): m for s, m in seps.items() if len(s)})
 
@@ -98,3 +100,36 @@ def test_mfcf_against_independent_reference(n, kind, kmax, kmin, c, theta):
             assert _outerplanar(g)
         if c == 1 and kmax == 4:
             assert nx.check_planarity(g)[0]
+
+
+def test_default_gain_is_loglik():
+    assert MFCF()._gf_type == "loglik"
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_loglik_gain_equals_regression(seed):
+    """With threshold 0 the whole separator is used and the gain must equal
+    -1/2 log(1 - R^2) of the regression of the chosen node on the separator."""
+    rng = np.random.default_rng(seed)
+    X = rng.standard_normal((300, 12)) @ rng.standard_normal((12, 12)) + rng.standard_normal((300, 12))
+    C = np.corrcoef(X, rowvar=False)
+    sep = frozenset(range(5))
+    mask = np.zeros(12, dtype=bool)
+    mask[5:] = True
+    g, v, sw = Gains(C, 0.0, 1, "loglik").get_best_gain(mask, sep)
+    s = sorted(sw.separator)
+    assert s == list(range(5))
+    r2 = C[v, s] @ np.linalg.solve(C[np.ix_(s, s)], C[s, v])
+    assert np.isclose(g, -0.5 * np.log(1 - r2))
+    best = max(-0.5 * np.log(1 - C[u, s] @ np.linalg.solve(C[np.ix_(s, s)], C[s, u])) for u in range(5, 12))
+    assert np.isclose(g, best)
+
+
+@pytest.mark.parametrize("k", [3, 4, 6])
+def test_loglik_fixed_size_is_k_tree(k):
+    C = _corr(30, 1, "sector")
+    cliques, seps, peo, J = MFCF(threshold=0.0, min_clique_size=k, max_clique_size=k,
+                                 gain_function_type="loglik").run(C)
+    edges = {frozenset(e) for q in cliques for e in itertools.combinations(sorted(q), 2)}
+    assert len(edges) == (k - 1) * 30 - k * (k - 1) // 2
+    assert all(len(q) == k for q in cliques)
