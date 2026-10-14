@@ -810,8 +810,10 @@ class MFCF:
         squared similarities to the other outstanding vertices (independent
         of the labelling of the variables); "first" takes the lowest index,
         as in versions before 2026.10.
-    n_starts : int, default=1
-        Number of starting cliques, at most `max_clique_size`. The expansion
+    n_starts : int or None, default=None
+        Number of starting cliques, at most `max_clique_size`. None means
+        `max_clique_size` with a statistical acceptance rule ("ftest", "bic")
+        and 1 with "threshold". The expansion
         is greedy and its result depends on where it starts: with
         ``n_starts=k`` it is run from the default seed and from k - 1 further
         seeds spread over the network (strong vertices weakly related to the
@@ -854,7 +856,7 @@ class MFCF:
         alpha: float = 0.05,
         n_samples: Optional[int] = None,
         new_component: str = "strongest",
-        n_starts: int = 1,
+        n_starts: Optional[int] = None,
     ) -> None:
         if gain_function_type is None:
             warnings.warn(_DEFAULT_CHANGE_MSG, FutureWarning, stacklevel=2)
@@ -863,9 +865,11 @@ class MFCF:
         if new_component not in ("strongest", "first"):
             raise ValueError("new_component must be 'strongest' or 'first'")
         self._new_component = new_component
+        if n_starts is None:          # several starts pay off only with a statistical rule
+            n_starts = int(min(max_clique_size, 1e9)) if acceptance in ("ftest", "bic") else 1
         if (isinstance(n_starts, bool) or not isinstance(n_starts, (int, np.integer))
                 or not 1 <= n_starts <= max_clique_size):
-            raise ValueError("n_starts must be an integer between 1 and max_clique_size")
+            raise ValueError("n_starts must be None or an integer between 1 and max_clique_size")
         self._n_starts = int(n_starts)
         self._seed_override = None
         self._threshold = threshold

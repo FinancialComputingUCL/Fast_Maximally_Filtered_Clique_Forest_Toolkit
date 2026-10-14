@@ -19,6 +19,8 @@ _convert_cliques_to_adjacency
     using weights from S.
 """
 
+from typing import Optional
+
 import numpy as np
 from scipy.cluster.hierarchy import optimal_leaf_ordering
 from scipy.spatial.distance import squareform
@@ -44,7 +46,7 @@ def mfcf_dbhts(
     acceptance: str = "threshold",
     alpha: float = 0.05,
     new_component: str = "strongest",
-    n_starts: int = 1,
+    n_starts: Optional[int] = None,
     n_samples: int = None,
 ):
     """

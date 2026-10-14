@@ -184,9 +184,11 @@ largest objective: the decomposable Gaussian log-likelihood for `"loglik"`,
 the total (squared) edge weight for `"sum"` (`"sumsquares"`). The chosen start
 is in `start_`. It costs `k` runs. With the F-test and `k = max_clique_size = 5`
 it recovered 60-90% of the test log-likelihood gain of trying every vertex as
-a start, in simulations of chordal and factor models. Use it with a
-statistical acceptance rule: with `threshold=0` the in-sample likelihood
-favours denser forests and the gain does not carry over to new data.
+a start, in simulations of chordal and factor models. The default
+(`n_starts=None`) is therefore `max_clique_size` starts with a statistical
+acceptance rule ("ftest", "bic") and a single start with "threshold", where
+the in-sample likelihood favours denser forests and extra starts do not
+improve the fit to new data. Pass `n_starts=1` for the fastest run.
 
 ### Precision Estimation (`MFCFLoGO()`)
 ```python

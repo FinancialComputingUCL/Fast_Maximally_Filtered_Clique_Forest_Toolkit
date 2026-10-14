@@ -470,11 +470,16 @@ def test_n_starts_validation(bad):
         MFCF(gain_function_type="loglik", max_clique_size=5, n_starts=bad)
 
 
-def test_n_starts_one_is_default():
-    R = _sample_corr()
-    kw = dict(gain_function_type="loglik", max_clique_size=5, acceptance="ftest", n_samples=200)
-    a, b = MFCF(**kw).run(R), MFCF(n_starts=1, **kw).run(R)
-    assert a[0] == b[0] and a[1] == b[1]
+@pytest.mark.parametrize("seed", range(4))
+def test_n_starts_default(seed):
+    """None: max_clique_size starts with a statistical rule, 1 with a threshold."""
+    R = _sample_corr(seed)
+    for kw, k in [(dict(acceptance="ftest", n_samples=200), 5), (dict(acceptance="bic", n_samples=200), 5),
+                  (dict(threshold=0.02), 1)]:
+        kw = dict(gain_function_type="loglik", max_clique_size=5, **kw)
+        a, b = MFCF(**kw).run(R), MFCF(n_starts=k, **kw).run(R)
+        assert a[0] == b[0] and a[1] == b[1]
+    assert MFCF(gain_function_type="loglik", max_clique_size=3, acceptance="ftest")._n_starts == 3
 
 
 @pytest.mark.parametrize("gain,kw", [("loglik", dict(acceptance="ftest", n_samples=200)),
