@@ -51,11 +51,11 @@ CASES = [c for c in CASES if c[3] <= c[2]]
 @pytest.mark.parametrize("n,kind,kmax,kmin,c,theta,gain", CASES)
 def test_mfcf_against_independent_reference(n, kind, kmax, kmin, c, theta, gain):
     C = _corr(n, 0, kind)
+    if gain == "sum":
+        C = np.abs(C)                          # "sum" requires non-negative weights
     out = MFCF(threshold=theta, min_clique_size=kmin, max_clique_size=kmax,
                coordination_number=c, gain_function_type=gain).run(C)
-    # with "sum", negative weights fall below a zero threshold: no k-tree guarantee
-    ktree = not (gain == "sum" and C.min() < 0)
-    _check_against_reference(n, C, out, kmax, kmin, c, theta if ktree else 1.0)
+    _check_against_reference(n, C, out, kmax, kmin, c, theta)
 
 
 def _check_against_reference(n, C, out, kmax, kmin, c, theta):
@@ -199,6 +199,10 @@ def test_option_validation():
     with pytest.raises(ValueError):
         MFCF().run(W)
     cl, _, _, _ = MFCF(gain_function_type="sumsquares").run(W)     # weight gains accept it
+    assert sorted({int(v) for q in cl for v in q}) == list(range(10))
+    with pytest.raises(ValueError):
+        MFCF(gain_function_type="sum").run(W)                     # negative weights rejected
+    cl, _, _, _ = MFCF(gain_function_type="sum").run(np.abs(W))
     assert sorted({int(v) for q in cl for v in q}) == list(range(10))
 
 

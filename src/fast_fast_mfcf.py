@@ -190,6 +190,16 @@ def _check_covariance(C: np.ndarray) -> None:
         raise ValueError(msg)
 
 
+def _check_nonnegative(W: np.ndarray) -> None:
+    off = W[~np.eye(W.shape[0], dtype=bool)] if W.ndim == 2 and W.shape[0] == W.shape[1] else W
+    if np.any(off < 0):
+        raise ValueError(
+            "gain_function_type='sum' requires a non-negative weight matrix; "
+            "transform the weights (e.g. np.abs(W)) or use 'sumsquares', which "
+            "sums the squared weights"
+        )
+
+
 # =============================================================================
 # Gains
 # =============================================================================
@@ -211,7 +221,8 @@ class Gains:
     - "sumsquares": ``sum_{j in S} C[v, j]^2`` over the entries
       ``C[v, j]^2 >= threshold``; `C` may be any weight matrix.
     - "sum": ``sum_{j in S} C[v, j]`` over the entries ``C[v, j] >= threshold``;
-      for non-negative weight matrices.
+      `C` must be non-negative off the diagonal (checked). "sumsquares" is
+      "sum" applied to the non-negative weights ``C ** 2``.
 
     In all cases the top ``min_clique_size - 1`` picks are mandatory.
 
@@ -268,6 +279,7 @@ class Gains:
             self._W = np.square(C)
         elif gf_type == "sum":
             self._W = np.asarray(C, dtype=float)
+            _check_nonnegative(self._W)
         else:  # "loglik"
             self._C = np.asarray(C, dtype=float)
             _check_covariance(self._C)

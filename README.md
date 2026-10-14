@@ -60,7 +60,7 @@ accordingly:
 |---|---|---|---|
 | covariance / correlation | `"loglik"` (default) | exact `-1/2 log(1 - R^2_{v|S})` | `"threshold"`, `"ftest"`, `"bic"` |
 | any weight matrix | `"sumsquares"` | `sum_{u in S} C[v,u]^2` | `"threshold"` |
-| non-negative weight matrix | `"sum"` | `sum_{u in S} C[v,u]` | `"threshold"` |
+| non-negative weight matrix (checked) | `"sum"` | `sum_{u in S} C[v,u]` | `"threshold"` |
 
 With `"loglik"`, `S` is grown greedily inside a clique (or facet), adding at
 each step the vertex with the largest squared partial correlation with `v`.
@@ -83,7 +83,10 @@ fixed-size construction. Variable clique sizes come from `threshold > 0` or a
 statistical rule.
 
 With the weight gains, `threshold` applies to each `C[v,u]^2` ("sumsquares") or
-`C[v,u]` ("sum"), exactly as in earlier versions. `"loglik"` checks that `C` is
+`C[v,u]` ("sum"), exactly as in earlier versions. Weights must be non-negative:
+"sum" raises an error for negative off-diagonal entries, and "sumsquares" is
+"sum" applied to the non-negative weights `C**2`, so signed correlations can
+be passed to it directly. `"loglik"` checks that `C` is
 a valid covariance or correlation matrix and raises an error otherwise. For a
 weight matrix, `run()` returns `None` for the LoGo matrix unless `cov_matrix`
 is given.
