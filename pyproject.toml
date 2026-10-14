@@ -20,7 +20,8 @@ classifiers = [
 sklearn = ["scikit-learn>=1.2"]
 cv = ["scikit-learn>=1.2", "optuna>=3"]
 dbht = ["riskfolio-lib"]
-test = ["pytest", "pytest-timeout", "networkx", "scikit-learn>=1.2", "optuna>=3"]
+fast = ["numba>=0.57"]
+test = ["pytest", "pytest-timeout", "networkx", "scikit-learn>=1.2", "optuna>=3", "numba>=0.57"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

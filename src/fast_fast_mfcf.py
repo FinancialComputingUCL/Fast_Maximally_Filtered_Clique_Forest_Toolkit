@@ -51,6 +51,256 @@ import numpy.linalg as LA
 from scipy import stats
 
 # -----------------------------------------------------------------------------
+# Numba kernels of the direct path for the weight gains with threshold 0
+# (network generation). Ported from the `mutual_info` branch. Without Numba
+# the direct path is not used (its Python fallback is slower than the
+# general path).
+# -----------------------------------------------------------------------------
+try:
+    from numba import njit, prange  # type: ignore
+    _HAS_NUMBA = True
+except Exception:  # pragma: no cover - environments without numba
+    _HAS_NUMBA = False
+
+    def njit(*args, **kwargs):  # type: ignore[misc]
+        def _dec(fn):
+            return fn
+        if args and callable(args[0]):
+            return args[0]
+        return _dec
+
+    def prange(n):  # type: ignore[misc]
+        return range(n)
+
+
+@njit(cache=True, boundscheck=False, fastmath=False)
+def _refresh_seps_for_node(
+    v: int,
+    n_seps: int,
+    pending_arr: np.ndarray,
+    best_node_arr: np.ndarray,
+    has_argsort: np.ndarray,
+    ptrs: np.ndarray,
+    argsort_mat: np.ndarray,
+    outstanding: np.ndarray,
+    gain_mat: np.ndarray,
+    best_gain_arr: np.ndarray,
+) -> None:
+    """For every pending sep whose cached best was ``v`` recompute
+    the best over outstanding nodes.
+
+    For seps that have already paid the ``argsort`` cost
+    (``has_argsort[s]``), we just advance the per-sep pointer past
+    consumed nodes — ``O(1)`` amortised.  For not-yet-sorted seps,
+    we fall back to an inline ``O(p)`` argmax so the caller can keep
+    argsort creation lazy (and amortise it across larger parallel
+    batches).
+    """
+    p = outstanding.shape[0]
+    NEG_INF = -np.inf
+    for s in range(n_seps):
+        if not pending_arr[s]:
+            continue
+        if best_node_arr[s] != v:
+            continue
+        if has_argsort[s]:
+            ptr = ptrs[s]
+            while ptr < p and not outstanding[argsort_mat[s, ptr]]:
+                ptr += 1
+            ptrs[s] = ptr
+            if ptr >= p:
+                best_gain_arr[s] = NEG_INF
+                best_node_arr[s] = -1
+            else:
+                idx = argsort_mat[s, ptr]
+                best_node_arr[s] = idx
+                best_gain_arr[s] = gain_mat[s, idx]
+        else:
+            bv = NEG_INF
+            bi = -1
+            for i in range(p):
+                if outstanding[i]:
+                    g = gain_mat[s, i]
+                    if g > bv:
+                        bv = g
+                        bi = i
+            best_node_arr[s] = bi
+            best_gain_arr[s] = bv
+
+
+@njit(cache=True, boundscheck=False, fastmath=False)
+def _ensure_best_kernel(
+    s: int,
+    ptrs: np.ndarray,
+    argsort_mat: np.ndarray,
+    outstanding: np.ndarray,
+    gain_mat: np.ndarray,
+    best_gain_arr: np.ndarray,
+    best_node_arr: np.ndarray,
+) -> None:
+    """Advance the argsort pointer for a single sep until it lands on
+    an outstanding node, then refresh the cached best.  Per-sep
+    sibling of :func:`_refresh_seps_for_node`.
+    """
+    p = outstanding.shape[0]
+    ptr = ptrs[s]
+    while ptr < p and not outstanding[argsort_mat[s, ptr]]:
+        ptr += 1
+    ptrs[s] = ptr
+    if ptr >= p:
+        best_gain_arr[s] = -np.inf
+        best_node_arr[s] = -1
+    else:
+        idx = argsort_mat[s, ptr]
+        best_node_arr[s] = idx
+        best_gain_arr[s] = gain_mat[s, idx]
+
+
+@njit(cache=True, boundscheck=False, fastmath=False, parallel=True)
+def _batch_argsort_descending(
+    gain_mat: np.ndarray,
+    argsort_mat: np.ndarray,
+    ids: np.ndarray,
+) -> None:
+    """Argsort by descending value for a batch of rows in parallel.
+
+    The sequential per-row ``np.argsort`` in numpy is ~70μs and
+    has ~30μs of Python wrapper overhead per call.  Folding ``N``
+    of them into one Numba kernel with ``prange`` exploits the
+    multiple cores available on macOS / Linux dev machines and
+    gives a ~6× wall-clock speed-up at N≈1500.  Ties are resolved
+    in undefined order, but that does not affect floating-point
+    parity in the simple regime because gain ties are statistically
+    impossible on real correlation data.
+    """
+    p = gain_mat.shape[1]
+    n = ids.shape[0]
+    for i in prange(n):
+        s = ids[i]
+        order = np.argsort(-gain_mat[s])
+        for j in range(p):
+            argsort_mat[s, j] = order[j]
+
+
+@njit(cache=True, boundscheck=False, fastmath=False)
+def _initial_argmax(
+    s: int,
+    outstanding: np.ndarray,
+    gain_mat: np.ndarray,
+    best_gain_arr: np.ndarray,
+    best_node_arr: np.ndarray,
+    is_empty: bool,
+) -> None:
+    """O(p) argmax over outstanding nodes — used to seed the cached
+    best when a sep is first created (no argsort precomputed yet).
+    """
+    p = outstanding.shape[0]
+    if is_empty:
+        for i in range(p):
+            if outstanding[i]:
+                best_gain_arr[s] = 0.0
+                best_node_arr[s] = i
+                return
+        best_gain_arr[s] = -np.inf
+        best_node_arr[s] = -1
+        return
+    bv = -np.inf
+    bi = -1
+    for i in range(p):
+        if outstanding[i]:
+            g = gain_mat[s, i]
+            if g > bv:
+                bv = g
+                bi = i
+    best_gain_arr[s] = bv
+    best_node_arr[s] = bi
+
+
+@njit(cache=True, boundscheck=False, fastmath=False)
+def _ensure_best_lazy_kernel(
+    s: int,
+    has_argsort: np.ndarray,
+    ptrs: np.ndarray,
+    argsort_mat: np.ndarray,
+    outstanding: np.ndarray,
+    gain_mat: np.ndarray,
+    best_gain_arr: np.ndarray,
+    best_node_arr: np.ndarray,
+    is_empty: bool,
+) -> None:
+    """Refresh a single sep's cached best.
+
+    Uses the argsort+ptr trick when ``has_argsort[s]`` is set;
+    otherwise falls back to an O(p) argmax over outstanding nodes
+    (so the caller can keep argsort-creation lazy).
+    """
+    p = outstanding.shape[0]
+    if has_argsort[s]:
+        ptr = ptrs[s]
+        while ptr < p and not outstanding[argsort_mat[s, ptr]]:
+            ptr += 1
+        ptrs[s] = ptr
+        if ptr >= p:
+            best_gain_arr[s] = -np.inf
+            best_node_arr[s] = -1
+        else:
+            idx = argsort_mat[s, ptr]
+            best_node_arr[s] = idx
+            best_gain_arr[s] = gain_mat[s, idx]
+        return
+    # No argsort yet — do an O(p) argmax over outstanding rows.
+    if is_empty:
+        for i in range(p):
+            if outstanding[i]:
+                best_gain_arr[s] = 0.0
+                best_node_arr[s] = i
+                return
+        best_gain_arr[s] = -np.inf
+        best_node_arr[s] = -1
+        return
+    bv = -np.inf
+    bi = -1
+    for i in range(p):
+        if outstanding[i]:
+            g = gain_mat[s, i]
+            if g > bv:
+                bv = g
+                bi = i
+    best_gain_arr[s] = bv
+    best_node_arr[s] = bi
+
+
+@njit(cache=True, boundscheck=False, fastmath=False)
+def _argmax_pending(
+    n_seps: int,
+    pending_arr: np.ndarray,
+    best_gain_arr: np.ndarray,
+    best_node_arr: np.ndarray,
+) -> int:
+    """Return the sep_id with the maximum ``(best_gain, -best_node)``
+    among pending entries.  Returns -1 if no candidate is valid.
+    """
+    best_id = -1
+    best_g = -np.inf
+    best_n = np.iinfo(np.int64).max
+    for s in range(n_seps):
+        if not pending_arr[s]:
+            continue
+        g = best_gain_arr[s]
+        if g > best_g:
+            best_g = g
+            best_n = best_node_arr[s]
+            best_id = s
+        elif g == best_g:
+            n = best_node_arr[s]
+            if n < best_n:
+                best_n = n
+                best_id = s
+    if best_id == -1 or not np.isfinite(best_g):
+        return -1
+    return best_id
+
+# -----------------------------------------------------------------------------
 # Logging
 # -----------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
@@ -187,9 +437,13 @@ def _check_covariance(C: np.ndarray, gain: str = "loglik") -> None:
         raise ValueError(msg)
     if np.any(np.diag(C) <= 0):
         raise ValueError(msg)
-    ev = np.linalg.eigvalsh((C + C.T) / 2)
-    if ev[0] < -1e-8 * max(ev[-1], 1.0):
-        raise ValueError(msg)
+    # positive semi-definite up to a small tolerance: Cholesky of C + eps I
+    # (an order of magnitude faster than an eigendecomposition)
+    eps = 1e-8 * max(float(np.diag(C).max()), 1.0)
+    try:
+        np.linalg.cholesky((C + C.T) / 2 + eps * np.eye(C.shape[0]))
+    except np.linalg.LinAlgError:
+        raise ValueError(msg) from None
 
 
 def _check_nonnegative(W: np.ndarray) -> None:
@@ -870,6 +1124,7 @@ class MFCF:
             raise ValueError("n_starts must be None or an integer between 1 and max_clique_size")
         self._n_starts = int(n_starts)
         self._seed_override = None
+        self._use_fast_path = True             # testing switch for the direct path
         self._threshold = threshold
         self._min_clique_size = min_clique_size
         self._max_clique_size = max_clique_size
@@ -919,7 +1174,7 @@ class MFCF:
         for k, seed in enumerate(seeds):
             self._seed_override = seed
             try:
-                self._build()
+                self._build_fast() if self._fast_path_applies() else self._build()
             finally:
                 self._seed_override = None
             if len(seeds) == 1:
@@ -990,6 +1245,329 @@ class MFCF:
             E[np.ix_(q, q)] = True
         np.fill_diagonal(E, False)
         return float(W[E].sum() / 2)
+
+    def _fast_path_applies(self) -> bool:
+        """Direct path: weight gains, threshold 0, min_clique_size <= 1, Numba."""
+        return (_HAS_NUMBA and self._use_fast_path and self._gf_type in ("sumsquares", "sum")
+                and self._threshold == 0.0 and self._min_clique_size <= 1)
+
+    def _build_fast(self) -> None:
+        """Direct algorithm for the weight gains with ``threshold == 0`` and
+        ``min_clique_size <= 1`` (network generation), ported from the
+        `mutual_info` branch: per-separator gain vectors with lazily sorted
+        candidates and Numba kernels replace the priority queue. It gives
+        the same clique forest as the general path."""
+        C = np.asarray(self._C, dtype=np.float64)
+        p = int(C.shape[0])
+        if self._gf_type == "sumsquares":
+            _check_covariance(C, "sumsquares")
+            W = np.asfortranarray(np.square(C))
+        else:
+            _check_nonnegative(C)
+            W = np.asfortranarray(C)
+        outstanding = np.ones(p, dtype=bool)
+        n_outstanding = p
+
+        # ---- Output state ---------------------------------------------------
+        first_cl: Clique = self._get_first_clique()
+        cliques: List[Clique] = [first_cl]
+        peo: List[Node] = [v for v in first_cl]
+        for v in first_cl:
+            outstanding[v] = False
+            n_outstanding -= 1
+
+        separators_count: Counter = Counter()
+        cliques_by_node: dict = {}
+        for v in first_cl:
+            cliques_by_node.setdefault(v, []).append(first_cl)
+
+        # ---- Active separator state ----------------------------------------
+        # We precompute, per separator, the *full* argsort over its
+        # gain vector and track a monotonically advancing pointer
+        # into it.  Because ``outstanding`` only ever shrinks, the
+        # pointer is amortised O(1) per query: each sep's pointer
+        # advances at most ``p`` times across the whole algorithm.
+        # All scalar bookkeeping fields are kept as numpy arrays so
+        # the global argmax in ``_find_best_pending`` is a single
+        # vectorised pass.
+        sep_to_id: dict = {}
+        sep_list: List[FrozenSet[int]] = []
+
+        cap = 1024
+        gain_mat = np.zeros((cap, p), dtype=np.float64)
+        # int32 is enough for p << 2**31; halves memory vs int64.
+        argsort_mat = np.zeros((cap, p), dtype=np.int32)
+        ptrs = np.zeros(cap, dtype=np.int32)
+        best_gain_arr = np.full(cap, -np.inf, dtype=np.float64)
+        best_node_arr = np.full(cap, -1, dtype=np.int64)
+        pending_arr = np.zeros(cap, dtype=bool)
+        # Per-sep flag: ``True`` once we've paid the argsort cost.
+        # We start at ``False`` and seed the initial best with a
+        # cheap O(p) argmax, deferring the O(p log p) argsort until
+        # the first refresh — at which point we batch-sort a group
+        # of stale seps in parallel for a much better constant.
+        has_argsort = np.zeros(cap, dtype=bool)
+        # Empty-sep rows are special-cased (gain == 0 everywhere),
+        # so we mark them as "argsort done" with an ``arange`` row
+        # in :func:`_add_or_get_sep`.
+        is_empty_sep = np.zeros(cap, dtype=bool)
+
+        max_c = int(self._max_clique_size)
+        min_c = int(self._min_clique_size)
+        threshold = float(self._threshold)
+        coord_cap = self._coordination_number
+        # Batch threshold for the lazy argsort path.  Set to ~32 so
+        # we have enough work per parallel kernel launch to amortise
+        # thread-spawn overhead, but not so high that the O(p)
+        # fallback dominates.
+        _ARGSORT_BATCH_THRESHOLD = 64
+
+        # Local refs for speed
+        _outstanding = outstanding
+        _arange_p = np.arange(p, dtype=np.int32)
+
+        def _grow(n_needed: int) -> None:
+            nonlocal cap, gain_mat, argsort_mat, ptrs
+            nonlocal best_gain_arr, best_node_arr, pending_arr
+            nonlocal has_argsort, is_empty_sep
+            if n_needed <= cap:
+                return
+            new_cap = cap
+            while new_cap < n_needed:
+                new_cap *= 2
+            new_gain = np.zeros((new_cap, p), dtype=np.float64)
+            new_gain[:cap] = gain_mat
+            new_argsort = np.zeros((new_cap, p), dtype=np.int32)
+            new_argsort[:cap] = argsort_mat
+            new_ptrs = np.zeros(new_cap, dtype=np.int32)
+            new_ptrs[:cap] = ptrs
+            new_bg = np.full(new_cap, -np.inf, dtype=np.float64)
+            new_bg[:cap] = best_gain_arr
+            new_bn = np.full(new_cap, -1, dtype=np.int64)
+            new_bn[:cap] = best_node_arr
+            new_pd = np.zeros(new_cap, dtype=bool)
+            new_pd[:cap] = pending_arr
+            new_ha = np.zeros(new_cap, dtype=bool)
+            new_ha[:cap] = has_argsort
+            new_ie = np.zeros(new_cap, dtype=bool)
+            new_ie[:cap] = is_empty_sep
+            gain_mat = new_gain
+            argsort_mat = new_argsort
+            ptrs = new_ptrs
+            best_gain_arr = new_bg
+            best_node_arr = new_bn
+            pending_arr = new_pd
+            has_argsort = new_ha
+            is_empty_sep = new_ie
+            cap = new_cap
+
+        def _ensure_best(sid: int) -> None:
+            _ensure_best_lazy_kernel(
+                sid, has_argsort, ptrs, argsort_mat, _outstanding,
+                gain_mat, best_gain_arr, best_node_arr,
+                bool(is_empty_sep[sid]),
+            )
+
+        def _add_or_get_sep(sep_fs: FrozenSet[int]) -> int:
+            sid = sep_to_id.get(sep_fs)
+            if sid is not None:
+                return sid
+            sid = len(sep_list)
+            _grow(sid + 1)
+            sep_list.append(sep_fs)
+            sep_to_id[sep_fs] = sid
+            if not sep_fs:
+                # All-zero gain; argsort is ``arange(p)`` so the
+                # empty-sep best is the first outstanding node.
+                gain_mat[sid] = 0.0
+                argsort_mat[sid] = _arange_p
+                has_argsort[sid] = True
+                is_empty_sep[sid] = True
+            else:
+                cols = np.fromiter(sep_fs, dtype=np.intp, count=len(sep_fs))
+                if cols.size == 1:
+                    gain_mat[sid] = W[:, cols[0]]
+                else:
+                    np.sum(W[:, cols], axis=1, out=gain_mat[sid])
+                # Defer argsort — initial best comes from a cheap
+                # O(p) argmax.  The full sort is only paid the
+                # first time we have to advance past the initial
+                # best, and we batch many such payments in
+                # parallel inside ``_batch_argsort_descending``.
+                has_argsort[sid] = False
+                is_empty_sep[sid] = False
+            ptrs[sid] = 0
+            _initial_argmax(
+                sid, _outstanding, gain_mat, best_gain_arr,
+                best_node_arr, bool(is_empty_sep[sid]),
+            )
+            return sid
+
+        def _push(sep_fs: FrozenSet[int]) -> None:
+            # PATCH: a separator that has reached the coordination cap
+            # can no longer host new vertices.
+            if sep_fs and separators_count[sep_fs] >= coord_cap:
+                return
+            sid = sep_to_id.get(sep_fs)
+            if sid is not None and pending_arr[sid]:
+                return
+            sid = _add_or_get_sep(sep_fs)
+            bn = int(best_node_arr[sid])
+            if bn >= 0 and not _outstanding[bn]:
+                _ensure_best(sid)
+            pending_arr[sid] = True
+
+        def _push_facets(clq: Clique) -> None:
+            # Mirror ``_process_new_clique_gains``: facets are always
+            # built from ``frozenset(facet_tuple)`` where the tuple is
+            # in sorted order. Matching this keeps the underlying
+            # hash-table layout of the stored ``sep_fs`` identical to
+            # the reference impl's first push, which downstream
+            # ``np.fromiter(sep)`` then iterates in the same order.
+            cs = len(clq)
+            clique_t = tuple(sorted(clq))
+            if cs < max_c:
+                _push(frozenset(clique_t))
+                return
+            for facet in itertools.combinations(clique_t, cs - 1):
+                _push(frozenset(facet))
+
+        def _find_best_pending() -> int:
+            # Lexicographic argmax over ``(best_gain, -best_node)``
+            # restricted to pending entries.  Implemented as a Numba
+            # kernel because the per-call numpy overhead dominates
+            # when ``len(sep_list) < ~5000``.
+            n = len(sep_list)
+            if n == 0:
+                return -1
+            return int(_argmax_pending(
+                n, pending_arr, best_gain_arr, best_node_arr,
+            ))
+
+        # Seed PQ with facets/whole-clique of the initial seed.
+        _push_facets(first_cl)
+
+        # ---- Main loop ------------------------------------------------------
+        while n_outstanding > 0:
+            sid = _find_best_pending()
+            if sid < 0:
+                # No active separator with a valid best — fall back to
+                # the reference "force new clique" path.
+                sep_fs = cliques[-1]
+                v = self._choose_root(_outstanding)
+                gain = 0.0
+                prior_sep = sep_fs
+            else:
+                sep_fs = sep_list[sid]
+                v = int(best_node_arr[sid])
+                gain = float(best_gain_arr[sid])
+                prior_sep = sep_fs
+                pending_arr[sid] = False
+
+            # Apply threshold. The parent clique is only consulted
+            # for logging in the reference path, so we skip looking
+            # it up here.
+            #
+            # Note on float-exact equivalence: the reference
+            # ``Gains._separator_for_row`` returns
+            # ``kept = frozenset(cols[keep_mask])`` where
+            # ``cols = np.fromiter(sep, dtype=np.intp)``.  In the
+            # simple regime ``keep_mask`` is all-True, so the kept
+            # set is just ``frozenset(cols)`` — equal to ``sep`` as a
+            # set but with a different internal hash-table layout
+            # (and ``np.int64`` element type).  That layout flows
+            # through ``new_clique = frozenset(sep | {v})`` and
+            # through ``separators_count[sep]``, where the *first*
+            # frozenset inserted fixes the iteration order used by
+            # ``_logo``'s ``tuple(clq)`` indexing.  Mirroring this
+            # rebuild keeps every downstream ``inv(C[idx, idx])``
+            # batched LU pivoting bit-identical.
+            if gain < threshold or not sep_fs:
+                v = self._choose_root(_outstanding)
+                sep_used: FrozenSet[int] = frozenset()
+            else:
+                cols_arr = np.fromiter(sep_fs, dtype=np.intp, count=len(sep_fs))
+                sep_used = frozenset(cols_arr)
+
+            # ---- Add new clique --------------------------------------------
+            new_clique: Clique = frozenset(sep_used | {v})
+            peo.append(v)
+            _outstanding[v] = False
+            n_outstanding -= 1
+
+            cliques_before = list(cliques)
+
+            if len(new_clique) > 1:
+                to_remove = [c for c in cliques if c < new_clique]
+                for c in to_remove:
+                    cliques.remove(c)
+                    for w in c:
+                        b = cliques_by_node.get(w)
+                        if b is not None:
+                            try:
+                                b.remove(c)
+                            except ValueError:
+                                pass
+            cliques.append(new_clique)
+            for w in new_clique:
+                cliques_by_node.setdefault(w, []).append(new_clique)
+
+            # ---- Eager refresh of seps whose best_node was v ---------------
+            # Strategy: keep argsort lazy and batch it across many
+            # node-removal events.  Whenever the count of pushed-
+            # but-not-yet-sorted non-empty seps crosses a threshold,
+            # we run one big parallel argsort batch.  Until then,
+            # refresh uses the inline O(p) argmax fallback inside
+            # the numba kernel.  The threshold trades parallel
+            # amortisation against the per-refresh argmax cost.
+            n_seps = len(sep_list)
+            if n_seps:
+                unsorted_count_total = n_seps - int(has_argsort[:n_seps].sum())
+                if unsorted_count_total >= _ARGSORT_BATCH_THRESHOLD:
+                    sort_ids = np.flatnonzero(~has_argsort[:n_seps]).astype(np.int64)
+                    _batch_argsort_descending(
+                        gain_mat, argsort_mat, sort_ids,
+                    )
+                    has_argsort[sort_ids] = True
+                    ptrs[sort_ids] = 0
+                _refresh_seps_for_node(
+                    v, n_seps, pending_arr, best_node_arr,
+                    has_argsort, ptrs, argsort_mat,
+                    _outstanding, gain_mat, best_gain_arr,
+                )
+
+            # ---- _check_proposed_separator equivalent ----------------------
+            # The reference records ``sep_wrapper.separator`` (the
+            # kept / re-hashed sep) into ``separators_count``, while
+            # re-pushing under ``sep_wrapper.separator_prior_threshold``
+            # (the original / sorted-insertion sep).  Mirror both.
+            sep_for_check = sep_used if (gain >= threshold and sep_fs) else prior_sep
+            if sep_for_check and (min_c - 1) <= len(sep_for_check) < max_c:
+                under_cap = separators_count[sep_for_check] < coord_cap
+                if under_cap:
+                    not_superset = True
+                    for clq_before in cliques_before:
+                        if sep_for_check >= clq_before:
+                            not_superset = False
+                            break
+                    if not_superset:
+                        separators_count[sep_for_check] += 1
+                    if n_outstanding != 0 and separators_count[sep_for_check] < coord_cap:
+                        _push(prior_sep)
+
+            if n_outstanding == 0:
+                break
+
+            # Re-push prior_sep only while it is below the coordination
+            # cap (PATCH: enforce coordination_number on reuse, so that the
+            # recorded multiplicities equal the actual number of attachments).
+            if not (sep_for_check and separators_count[sep_for_check] >= coord_cap):
+                _push(prior_sep)
+            _push_facets(new_clique)
+
+        self._cliques = cliques
+        self._separators_count = separators_count
+        self._peo = peo
 
     def _build(self) -> None:
         """One run of the greedy expansion from the current seed."""

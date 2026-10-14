@@ -528,3 +528,33 @@ def test_n_starts_in_estimators():
     assert np.all(np.isfinite(m.precision_))
     cv = MFCFLoGoCV(gain_function_type="loglik", max_clique_size_grid=[2, 4], n_starts=4).fit(X)
     assert np.all(np.isfinite(cv.precision_))                        # n_starts capped at k = 2
+
+
+# ------------------------------------------------- direct path (Numba)
+@pytest.mark.parametrize("gain", ["sumsquares", "sum"])
+@pytest.mark.parametrize("K,c", [(2, np.inf), (3, 1), (4, 2), (4, np.inf), (6, 3)])
+@pytest.mark.parametrize("new_component", ["strongest", "first"])
+@pytest.mark.parametrize("seed", range(3))
+def test_direct_path_equals_general_path(gain, K, c, new_component, seed):
+    """With threshold 0 and the weight gains the Numba direct path must give
+    the same clique forest, separators and order as the general path."""
+    import fast_fast_mfcf as ff
+    if not ff._HAS_NUMBA:
+        pytest.skip("numba not installed")
+    R = _sample_corr(seed, p=40, n=120)
+    M = np.abs(R) if gain == "sum" else R
+    out = []
+    for fast in (True, False):
+        m = MFCF(gain_function_type=gain, max_clique_size=K, coordination_number=c,
+                 new_component=new_component, n_starts=min(2, K))
+        m._use_fast_path = fast
+        assert m._fast_path_applies() == fast
+        cl, sp, peo, J = m.run(M)
+        out.append(([frozenset(map(int, q)) for q in cl], dict(sp), [int(v) for v in peo], m.start_))
+    assert out[0] == out[1]
+
+
+def test_direct_path_not_used_outside_its_regime():
+    for kw in (dict(gain_function_type="loglik"), dict(gain_function_type="sumsquares", threshold=0.1),
+               dict(gain_function_type="sumsquares", min_clique_size=3)):
+        assert not MFCF(max_clique_size=4, **kw)._fast_path_applies()

@@ -56,6 +56,13 @@ weights.
 - README examples and the final cell of the LoGo notebook.
 
 ### Performance
+- Direct path for network generation (`"sumsquares"` / `"sum"` gain,
+  `threshold=0`, `min_clique_size <= 1`), ported from the `mutual_info`
+  branch: Numba kernels replace the priority queue, about 2x faster, same
+  clique forest as the general path (exact ties may be broken differently).
+  Used when numba is installed (extra `fast`).
+- Positive semi-definiteness checked by a Cholesky factorisation instead of
+  an eigendecomposition (about 10x faster for large p).
 - The log-likelihood gain is cached per separator (bounded memory) and uses
   closed-form facet updates; it runs at a cost comparable to the
   sum-of-squares gain (p = 1600, K = 8: about 4 s).

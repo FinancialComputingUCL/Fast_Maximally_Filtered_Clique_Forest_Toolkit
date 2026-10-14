@@ -22,6 +22,9 @@ pip install ".[sklearn]"        # or ".[cv,dbht]", ".[test]"
 python -m pytest -q             # from the repository root, with ".[test]"
 ```
 
+  The extra `fast` adds numba, which enables a direct path about twice as
+  fast for network generation (`"sumsquares"` or `"sum"` gain with
+  `threshold=0` and `min_clique_size <= 1`); results are the same without it.
   `pip install -r requirements.txt` still installs every optional dependency.
   Version history: [CHANGELOG.md](CHANGELOG.md).
 
