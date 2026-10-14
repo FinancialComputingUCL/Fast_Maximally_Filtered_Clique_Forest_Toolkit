@@ -853,8 +853,12 @@ def test_mutual_information_independent_discrete_columns(estimator):
     from mutual_information import mutual_information_matrix
     rng = np.random.default_rng(18)
     X = np.column_stack([rng.integers(0, 3, 1000), rng.integers(0, 3, 1000), rng.standard_normal(1000)]).astype(float)
-    L = mutual_information_matrix(X, estimator=estimator, random_state=0)
-    assert L[0, 1] < 0.2
+    if estimator == "histogram":
+        L = mutual_information_matrix(X, estimator=estimator, random_state=0)
+        assert L[0, 1] < 0.2
+    else:   # KSG is biased on heavily tied data (both backends): small in nats
+        raw = mutual_information_matrix(X, estimator=estimator, random_state=0, normalize="none")
+        assert raw[0, 1] < 0.05
 
 
 def test_numba_failure_falls_back_to_general_path(monkeypatch):

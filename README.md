@@ -157,7 +157,8 @@ m.n_effective_                            # observations used by the test
   mutual information in Linfoot's normalisation `sqrt(1 - exp(-2 I))`, which
   captures non-linear and tail dependence (it equals `|rho|` for Gaussian
   data). Estimators: `mi_estimator="ksg"` (k-nearest neighbours, default) or
-  `"histogram"` (equal-frequency bins, much faster). It requires the
+  `"histogram"` (equal-frequency bins, much faster; the choice for discrete or
+  heavily tied data, where KSG is biased). It requires the
   `"sumsquares"` or `"sum"` gain; the precision is still assembled from the
   correlation blocks. The matrix can be precomputed with
   `mutual_information.mutual_information_matrix(X)` and passed as
