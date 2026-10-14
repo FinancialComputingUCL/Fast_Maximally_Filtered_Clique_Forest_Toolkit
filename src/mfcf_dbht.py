@@ -21,6 +21,7 @@ _convert_cliques_to_adjacency
 
 import numpy as np
 from scipy.cluster.hierarchy import optimal_leaf_ordering
+from scipy.spatial.distance import squareform
 from riskfolio import (
     distance_wei,
     CliqHierarchyTree2s,
@@ -145,7 +146,10 @@ def mfcf_dbhts(
     Z = HierarchyConstruct4s(Rpm, Dpm, T8, Adjv, Mv)
 
     if leaf_order == True:
-        Z = optimal_leaf_ordering(Z, squareform(D))
+        # symmetrise: correlation-based distances are symmetric only up to rounding
+        Dsym = (np.asarray(D, dtype=float) + np.asarray(D, dtype=float).T) / 2
+        np.fill_diagonal(Dsym, 0.0)
+        Z = optimal_leaf_ordering(Z, squareform(Dsym))
 
     return (T8, Rpm, Adjv, Dpm, Mv, Z)
 

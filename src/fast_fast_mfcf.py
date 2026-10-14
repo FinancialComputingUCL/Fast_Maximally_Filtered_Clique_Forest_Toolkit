@@ -849,6 +849,8 @@ class MFCF:
         X = np.asarray(X, dtype=float)
         if X.ndim != 2 or X.shape[0] < 3:
             raise ValueError("X must be an (n_samples, n_features) array with n_samples >= 3")
+        if not np.all(np.isfinite(X)):
+            raise ValueError("X contains NaN or infinite values; handle missing data before fit(X)")
         if not 0 <= shrinkage < 1:
             raise ValueError("shrinkage must be in [0, 1)")
         n, p = X.shape
@@ -1182,6 +1184,8 @@ class MFCF:
         If `|clq| < max_clique_size`, the whole clique is considered a separator
         candidate; otherwise, all size-1 facets are pushed.
         """
+        if not self._outstanding_nodes_mask.any():
+            return                      # nothing left to attach (e.g. seed covers all nodes)
         clique = tuple(sorted(clq))
         clique_size = len(clq)
 
