@@ -1,0 +1,422 @@
+[
+ {
+  "p": 100,
+  "K": 4,
+  "setting": "loglik fixed",
+  "seconds": 0.021574791986495256,
+  "peak_mb": 0.57874
+ },
+ {
+  "p": 100,
+  "K": 4,
+  "setting": "loglik F-test",
+  "seconds": 0.18690058297943324,
+  "peak_mb": 0.801411
+ },
+ {
+  "p": 100,
+  "K": 4,
+  "setting": "sumsquares fixed",
+  "seconds": 0.02908545802347362,
+  "peak_mb": 0.486228
+ },
+ {
+  "p": 100,
+  "K": 4,
+  "setting": "sumsquares thr 0.05",
+  "seconds": 0.02279075002297759,
+  "peak_mb": 0.482508
+ },
+ {
+  "p": 100,
+  "K": 8,
+  "setting": "loglik fixed",
+  "seconds": 0.04288637498393655,
+  "peak_mb": 1.665068
+ },
+ {
+  "p": 100,
+  "K": 8,
+  "setting": "loglik F-test",
+  "seconds": 0.7467807499924675,
+  "peak_mb": 2.820319
+ },
+ {
+  "p": 100,
+  "K": 8,
+  "setting": "sumsquares fixed",
+  "seconds": 0.07979891693685204,
+  "peak_mb": 1.529428
+ },
+ {
+  "p": 100,
+  "K": 8,
+  "setting": "sumsquares thr 0.05",
+  "seconds": 0.024506208021193743,
+  "peak_mb": 0.816628
+ },
+ {
+  "p": 100,
+  "K": 16,
+  "setting": "loglik fixed",
+  "seconds": 0.11700941598974168,
+  "peak_mb": 3.0223
+ },
+ {
+  "p": 100,
+  "K": 16,
+  "setting": "loglik F-test",
+  "seconds": 0.2413129589986056,
+  "peak_mb": 0.671335
+ },
+ {
+  "p": 100,
+  "K": 16,
+  "setting": "sumsquares fixed",
+  "seconds": 0.18011295795440674,
+  "peak_mb": 3.004988
+ },
+ {
+  "p": 100,
+  "K": 16,
+  "setting": "sumsquares thr 0.05",
+  "seconds": 0.011932124965824187,
+  "peak_mb": 0.496892
+ },
+ {
+  "p": 200,
+  "K": 4,
+  "setting": "loglik fixed",
+  "seconds": 0.06236741703469306,
+  "peak_mb": 1.369104
+ },
+ {
+  "p": 200,
+  "K": 4,
+  "setting": "loglik F-test",
+  "seconds": 0.4709971670527011,
+  "peak_mb": 1.944251
+ },
+ {
+  "p": 200,
+  "K": 4,
+  "setting": "sumsquares fixed",
+  "seconds": 0.07099637505598366,
+  "peak_mb": 1.46848
+ },
+ {
+  "p": 200,
+  "K": 4,
+  "setting": "sumsquares thr 0.05",
+  "seconds": 0.049940082943066955,
+  "peak_mb": 1.491192
+ },
+ {
+  "p": 200,
+  "K": 8,
+  "setting": "loglik fixed",
+  "seconds": 0.10892204195261002,
+  "peak_mb": 3.914236
+ },
+ {
+  "p": 200,
+  "K": 8,
+  "setting": "loglik F-test",
+  "seconds": 2.1226340420544147,
+  "peak_mb": 6.494246
+ },
+ {
+  "p": 200,
+  "K": 8,
+  "setting": "sumsquares fixed",
+  "seconds": 0.17374183307401836,
+  "peak_mb": 3.750976
+ },
+ {
+  "p": 200,
+  "K": 8,
+  "setting": "sumsquares thr 0.05",
+  "seconds": 0.08343424997292459,
+  "peak_mb": 2.935056
+ },
+ {
+  "p": 200,
+  "K": 16,
+  "setting": "loglik fixed",
+  "seconds": 0.36003308405634016,
+  "peak_mb": 6.979224
+ },
+ {
+  "p": 200,
+  "K": 16,
+  "setting": "loglik F-test",
+  "seconds": 2.146597500075586,
+  "peak_mb": 4.017278
+ },
+ {
+  "p": 200,
+  "K": 16,
+  "setting": "sumsquares fixed",
+  "seconds": 0.5064964580815285,
+  "peak_mb": 6.952016
+ },
+ {
+  "p": 200,
+  "K": 16,
+  "setting": "sumsquares thr 0.05",
+  "seconds": 0.02941220800857991,
+  "peak_mb": 1.559736
+ },
+ {
+  "p": 400,
+  "K": 4,
+  "setting": "loglik fixed",
+  "seconds": 0.13660575007088482,
+  "peak_mb": 4.292248
+ },
+ {
+  "p": 400,
+  "K": 4,
+  "setting": "loglik F-test",
+  "seconds": 1.1131692909402773,
+  "peak_mb": 5.451655
+ },
+ {
+  "p": 400,
+  "K": 4,
+  "setting": "sumsquares fixed",
+  "seconds": 0.1809231670340523,
+  "peak_mb": 5.280144
+ },
+ {
+  "p": 400,
+  "K": 4,
+  "setting": "sumsquares thr 0.05",
+  "seconds": 0.09797987504862249,
+  "peak_mb": 5.280144
+ },
+ {
+  "p": 400,
+  "K": 8,
+  "setting": "loglik fixed",
+  "seconds": 0.37274079106282443,
+  "peak_mb": 9.235148
+ },
+ {
+  "p": 400,
+  "K": 8,
+  "setting": "loglik F-test",
+  "seconds": 5.463041999959387,
+  "peak_mb": 16.886315
+ },
+ {
+  "p": 400,
+  "K": 8,
+  "setting": "sumsquares fixed",
+  "seconds": 0.5285801250720397,
+  "peak_mb": 9.515872
+ },
+ {
+  "p": 400,
+  "K": 8,
+  "setting": "sumsquares thr 0.05",
+  "seconds": 0.2353859170107171,
+  "peak_mb": 9.047208
+ },
+ {
+  "p": 400,
+  "K": 16,
+  "setting": "loglik fixed",
+  "seconds": 1.2670196670806035,
+  "peak_mb": 17.002624
+ },
+ {
+  "p": 400,
+  "K": 16,
+  "setting": "loglik F-test",
+  "seconds": 8.23829058301635,
+  "peak_mb": 12.690947
+ },
+ {
+  "p": 400,
+  "K": 16,
+  "setting": "sumsquares fixed",
+  "seconds": 1.7538325829664245,
+  "peak_mb": 16.677624
+ },
+ {
+  "p": 400,
+  "K": 16,
+  "setting": "sumsquares thr 0.05",
+  "seconds": 0.2712934579467401,
+  "peak_mb": 7.828008
+ },
+ {
+  "p": 800,
+  "K": 4,
+  "setting": "loglik fixed",
+  "seconds": 0.48024879198055714,
+  "peak_mb": null
+ },
+ {
+  "p": 800,
+  "K": 4,
+  "setting": "loglik F-test",
+  "seconds": 3.022058791015297,
+  "peak_mb": null
+ },
+ {
+  "p": 800,
+  "K": 4,
+  "setting": "sumsquares fixed",
+  "seconds": 0.5327956250403076,
+  "peak_mb": null
+ },
+ {
+  "p": 800,
+  "K": 4,
+  "setting": "sumsquares thr 0.05",
+  "seconds": 0.2853960000211373,
+  "peak_mb": null
+ },
+ {
+  "p": 800,
+  "K": 8,
+  "setting": "loglik fixed",
+  "seconds": 1.0528733750106767,
+  "peak_mb": 24.749644
+ },
+ {
+  "p": 800,
+  "K": 8,
+  "setting": "loglik F-test",
+  "seconds": 15.830342417000793,
+  "peak_mb": 46.353113
+ },
+ {
+  "p": 800,
+  "K": 8,
+  "setting": "sumsquares fixed",
+  "seconds": 1.5630296670133248,
+  "peak_mb": 27.109464
+ },
+ {
+  "p": 800,
+  "K": 8,
+  "setting": "sumsquares thr 0.05",
+  "seconds": 0.7383435409283265,
+  "peak_mb": 26.59812
+ },
+ {
+  "p": 800,
+  "K": 16,
+  "setting": "loglik fixed",
+  "seconds": 4.316642708959989,
+  "peak_mb": null
+ },
+ {
+  "p": 800,
+  "K": 16,
+  "setting": "loglik F-test",
+  "seconds": 29.338408624986187,
+  "peak_mb": null
+ },
+ {
+  "p": 800,
+  "K": 16,
+  "setting": "sumsquares fixed",
+  "seconds": 5.365076999994926,
+  "peak_mb": null
+ },
+ {
+  "p": 800,
+  "K": 16,
+  "setting": "sumsquares thr 0.05",
+  "seconds": 1.9506356669589877,
+  "peak_mb": null
+ },
+ {
+  "p": 1600,
+  "K": 4,
+  "setting": "loglik fixed",
+  "seconds": 1.559786666999571,
+  "peak_mb": null
+ },
+ {
+  "p": 1600,
+  "K": 4,
+  "setting": "loglik F-test",
+  "seconds": 8.339958875090815,
+  "peak_mb": null
+ },
+ {
+  "p": 1600,
+  "K": 4,
+  "setting": "sumsquares fixed",
+  "seconds": 1.6867295419797301,
+  "peak_mb": null
+ },
+ {
+  "p": 1600,
+  "K": 4,
+  "setting": "sumsquares thr 0.05",
+  "seconds": 0.837031708098948,
+  "peak_mb": null
+ },
+ {
+  "p": 1600,
+  "K": 8,
+  "setting": "loglik fixed",
+  "seconds": 3.594432291924022,
+  "peak_mb": 69.222716
+ },
+ {
+  "p": 1600,
+  "K": 8,
+  "setting": "loglik F-test",
+  "seconds": 47.47749816603027,
+  "peak_mb": 121.376018
+ },
+ {
+  "p": 1600,
+  "K": 8,
+  "setting": "sumsquares fixed",
+  "seconds": 5.466184334014542,
+  "peak_mb": 84.674192
+ },
+ {
+  "p": 1600,
+  "K": 8,
+  "setting": "sumsquares thr 0.05",
+  "seconds": 2.274941207957454,
+  "peak_mb": 84.507792
+ },
+ {
+  "p": 1600,
+  "K": 16,
+  "setting": "loglik fixed",
+  "seconds": 16.008410499896854,
+  "peak_mb": null
+ },
+ {
+  "p": 1600,
+  "K": 16,
+  "setting": "loglik F-test",
+  "seconds": 91.72324799990747,
+  "peak_mb": null
+ },
+ {
+  "p": 1600,
+  "K": 16,
+  "setting": "sumsquares fixed",
+  "seconds": 18.791078125010245,
+  "peak_mb": null
+ },
+ {
+  "p": 1600,
+  "K": 16,
+  "setting": "sumsquares thr 0.05",
+  "seconds": 6.941314750001766,
+  "peak_mb": null
+ }
+]
