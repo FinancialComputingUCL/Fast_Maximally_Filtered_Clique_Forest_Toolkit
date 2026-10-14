@@ -182,13 +182,14 @@ from `k - 1` further seeds spread over the network (strong vertices weakly
 related to the seeds already chosen), and keeps the clique forest with the
 largest objective: the decomposable Gaussian log-likelihood for `"loglik"`,
 the total (squared) edge weight for `"sum"` (`"sumsquares"`). The chosen start
-is in `start_`. It costs `k` runs. With the F-test and `k = max_clique_size = 5`
-it recovered 60-90% of the test log-likelihood gain of trying every vertex as
-a start, in simulations of chordal and factor models. The default
-(`n_starts=None`) is therefore `max_clique_size` starts with a statistical
-acceptance rule ("ftest", "bic") and a single start with "threshold", where
-the in-sample likelihood favours denser forests and extra starts do not
-improve the fit to new data. Pass `n_starts=1` for the fastest run.
+is in `start_`. It costs `k` runs. In simulations of chordal, factor and
+sparse models with the `"loglik"` gain, `k = max_clique_size` starts improved
+the test log-likelihood (by 0.1-0.4 per observation on chordal and factor
+models) and the recovery of the true network, with the F-test, BIC or a
+threshold alike, capturing 60-90% of the gain of trying every vertex as a
+start. With `"sumsquares"` and `"sum"` the gain was negligible. The default
+(`n_starts=None`) is therefore `max_clique_size` starts for `"loglik"` and a
+single start for the weight gains. Pass `n_starts=1` for the fastest run.
 
 ### Precision Estimation (`MFCFLoGO()`)
 ```python

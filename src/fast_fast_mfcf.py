@@ -811,19 +811,17 @@ class MFCF:
         of the labelling of the variables); "first" takes the lowest index,
         as in versions before 2026.10.
     n_starts : int or None, default=None
-        Number of starting cliques, at most `max_clique_size`. None means
-        `max_clique_size` with a statistical acceptance rule ("ftest", "bic")
-        and 1 with "threshold". The expansion
+        Number of starting cliques, at most `max_clique_size`. The expansion
         is greedy and its result depends on where it starts: with
         ``n_starts=k`` it is run from the default seed and from k - 1 further
         seeds spread over the network (strong vertices weakly related to the
         seeds already chosen), and the clique forest with the largest
-        objective is kept (the
-        decomposable Gaussian log-likelihood for "loglik", the total edge
-        weight, squared for "sumsquares", otherwise). Costs k runs. Most
-        useful with a statistical acceptance rule; with ``threshold=0`` the
-        in-sample likelihood favours denser forests and the gain does not
-        carry over to new data. ``start_`` records the start chosen.
+        objective is kept (the decomposable Gaussian log-likelihood for
+        "loglik", the total edge weight, squared for "sumsquares",
+        otherwise). Costs k runs. None means `max_clique_size` for "loglik",
+        where it improves the fit to new data under every acceptance rule,
+        and 1 for the weight gains, where it brings little. ``start_``
+        records the start chosen.
 
     Notes
     -----
@@ -865,8 +863,8 @@ class MFCF:
         if new_component not in ("strongest", "first"):
             raise ValueError("new_component must be 'strongest' or 'first'")
         self._new_component = new_component
-        if n_starts is None:          # several starts pay off only with a statistical rule
-            n_starts = int(min(max_clique_size, 1e9)) if acceptance in ("ftest", "bic") else 1
+        if n_starts is None:          # several starts pay off with the likelihood objective
+            n_starts = int(min(max_clique_size, 1e9)) if gain_function_type == "loglik" else 1
         if (isinstance(n_starts, bool) or not isinstance(n_starts, (int, np.integer))
                 or not 1 <= n_starts <= max_clique_size):
             raise ValueError("n_starts must be None or an integer between 1 and max_clique_size")
@@ -981,8 +979,10 @@ class MFCF:
                 q = sorted(q)
                 sgn, val = np.linalg.slogdet(C[np.ix_(q, q)]) if q else (1.0, 0.0)
                 return val if sgn > 0 else -np.inf
-            return -0.5 * (sum(ld(q) for q in self._cliques)
-                           - sum(m * ld(sp) for sp, m in self._separators_count.items()))
+            with np.errstate(invalid="ignore"):
+                val = -0.5 * (sum(ld(q) for q in self._cliques)
+                              - sum(m * ld(sp) for sp, m in self._separators_count.items()))
+            return float(val) if np.isfinite(val) else -np.inf   # singular blocks rank last
         W = np.abs(C) if self._gf_type == "sum" else C * C
         E = np.zeros(C.shape, dtype=bool)
         for q in self._cliques:

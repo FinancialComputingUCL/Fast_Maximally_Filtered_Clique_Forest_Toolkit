@@ -3,9 +3,9 @@
 `python benchmarks/bench_scaling.py` times `MFCF.run` on a p x p correlation
 matrix (5-factor data, n = 4000) for p = 100 ... 1600 and K = 4, 8, 16,
 single core (`OMP_NUM_THREADS=1`), and records peak memory (tracemalloc).
-All timings are for a single start (`n_starts=1`). With a statistical
-acceptance rule the default is `n_starts=max_clique_size`, which multiplies
-the F-test times by K.
+All timings are for a single start (`n_starts=1`). With the `"loglik"` gain
+the default is `n_starts=max_clique_size`, which multiplies the loglik times
+by K.
 Results of the run below: `bench_scaling.json` (Apple M-series, Python 3.12).
 
 ## Runtimes (seconds)

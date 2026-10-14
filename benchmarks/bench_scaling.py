@@ -5,7 +5,7 @@ sys.path.insert(0, sys.argv[1] if len(sys.argv) > 1 else "src")
 from fast_fast_mfcf import MFCF
 out = sys.argv[2] if len(sys.argv) > 2 else "benchmarks/bench_scaling.json"
 SETTINGS = {
-    "loglik fixed":        lambda K, n: dict(min_clique_size=K, max_clique_size=K),
+    "loglik fixed":        lambda K, n: dict(min_clique_size=K, max_clique_size=K, n_starts=1),
     "loglik F-test":       lambda K, n: dict(max_clique_size=K, acceptance="ftest", alpha=0.01, n_samples=n, n_starts=1),
     "sumsquares fixed":    lambda K, n: dict(min_clique_size=K, max_clique_size=K, gain_function_type="sumsquares"),
     "sumsquares thr 0.05": lambda K, n: dict(max_clique_size=K, threshold=0.05, gain_function_type="sumsquares"),

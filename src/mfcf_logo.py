@@ -54,7 +54,7 @@ class MFCFLoGo(EmpiricalCovariance):
     n_starts : int or None, default=None
         Number of starting cliques, at most `max_clique_size`; the clique
         forest with the largest objective is kept. None: `max_clique_size`
-        with a statistical acceptance rule, 1 otherwise (see `MFCF`).
+        for the 'loglik' gain, 1 otherwise (see `MFCF`).
 
     shrinkage : float, default=0.0
         Identity shrinkage of the correlation blocks of the LoGo assembly.
@@ -281,7 +281,7 @@ class MFCFLoGoCV(EmpiricalCovariance):
     n_starts : int or None, default=None
         Number of starting cliques, at most `max_clique_size`; the clique
         forest with the largest objective is kept. None: `max_clique_size`
-        with a statistical acceptance rule, 1 otherwise (see `MFCF`).
+        for the 'loglik' gain, 1 otherwise (see `MFCF`).
 
     assume_centered : bool, default=False
         If True, data are not centered before computation.
@@ -632,7 +632,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
     n_starts : int or None, default=None
         Number of starting cliques, at most `max_clique_size`; the clique
         forest with the largest objective is kept. None: `max_clique_size`
-        with a statistical acceptance rule, 1 otherwise (see `MFCF`).
+        for the 'loglik' gain, 1 otherwise (see `MFCF`).
 
     assume_centered : bool, default=False
         If True, data are not centered before computation.

@@ -472,14 +472,16 @@ def test_n_starts_validation(bad):
 
 @pytest.mark.parametrize("seed", range(4))
 def test_n_starts_default(seed):
-    """None: max_clique_size starts with a statistical rule, 1 with a threshold."""
+    """None: max_clique_size starts for 'loglik' (any acceptance), 1 for the weight gains."""
     R = _sample_corr(seed)
     for kw, k in [(dict(acceptance="ftest", n_samples=200), 5), (dict(acceptance="bic", n_samples=200), 5),
-                  (dict(threshold=0.02), 1)]:
+                  (dict(threshold=0.02), 5)]:
         kw = dict(gain_function_type="loglik", max_clique_size=5, **kw)
         a, b = MFCF(**kw).run(R), MFCF(n_starts=k, **kw).run(R)
         assert a[0] == b[0] and a[1] == b[1]
-    assert MFCF(gain_function_type="loglik", max_clique_size=3, acceptance="ftest")._n_starts == 3
+    assert MFCF(gain_function_type="loglik", max_clique_size=3)._n_starts == 3
+    assert MFCF(gain_function_type="sumsquares", max_clique_size=5)._n_starts == 1
+    assert MFCF(gain_function_type="sum", max_clique_size=5)._n_starts == 1
 
 
 @pytest.mark.parametrize("gain,kw", [("loglik", dict(acceptance="ftest", n_samples=200)),

@@ -37,8 +37,9 @@ weights.
   `"kendall"`).
 - `n_starts`: runs the greedy expansion from several seeds spread over the
   network and keeps the clique forest with the largest objective. Default:
-  `max_clique_size` starts with a statistical acceptance rule (better fit to
-  new data at K times the cost), one start with a threshold.
+  `max_clique_size` starts for the `"loglik"` gain (better fit to new data
+  and better network recovery, at K times the cost), one start for the
+  weight gains.
 - `alpha` can be tuned by `MFCFLoGoCVAll`.
 - Installable package (`pyproject.toml`; core needs only numpy and scipy,
   optuna is imported only by `MFCFLoGoCVAll`); input validation with
