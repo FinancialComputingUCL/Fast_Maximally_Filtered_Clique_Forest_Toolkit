@@ -6,6 +6,9 @@ Accelerated Maximally Filtered Clique Forest (MFCF) implementations for sparse p
 - Build MFCF backbones from dense similarity matrices in a few seconds.
 - Drop-in graphical-model estimators (`MFCFLoGO`, `MFCFLoGOCV`, `MFCFLoGOCVAll`) that follow the scikit-learn API and offer a faster, more accurate alternative to Graphical Lasso when the sample-to-feature ratio is small.
 - Extend Riskfolio-Lib’s Direct Bubble Hierarchical Tree (DBHT) pipeline so it can operate over any MFCF backbone instead of only TMFG graphs (`mfcf_dbht`).
+- Gaussian log-likelihood gain with statistical validation (F-test, BIC), several starts, and decomposable maximum-likelihood precision built directly from data (`MFCF.fit`).
+- Dependence beyond correlation: rank (Spearman, Kendall) and mutual-information (KSG, histogram) similarities (`mutual_information`).
+- One package for all earlier lines of development: the original `fast_fast_mfcf`, the toolkit `main` branch and the `mutual_info` branch (see *Compatibility with earlier versions*).
 
 ## Getting Started
 - Python 3.9+ recommended.
@@ -150,10 +153,20 @@ m.n_effective_                            # observations used by the test
 - `fit(X)` works with the `"loglik"` gain (default) or `"sumsquares"` (the
   original construction on the correlation matrix); for other weight
   matrices use `run(C)`.
+- `similarity="mutual_information"` builds the structure on the pairwise
+  mutual information in Linfoot's normalisation `sqrt(1 - exp(-2 I))`, which
+  captures non-linear and tail dependence (it equals `|rho|` for Gaussian
+  data). Estimators: `mi_estimator="ksg"` (k-nearest neighbours, default) or
+  `"histogram"` (equal-frequency bins, much faster). It requires the
+  `"sumsquares"` or `"sum"` gain; the precision is still assembled from the
+  correlation blocks. The matrix can be precomputed with
+  `mutual_information.mutual_information_matrix(X)` and passed as
+  `mi_matrix`.
 
 The LoGo estimators (`MFCFLoGo`, `MFCFLoGoCV`, `MFCFLoGoCVAll`) are built on
 `fit(X)` and accept the same options (`acceptance`, `alpha`, `new_component`,
-`n_starts`, `shrinkage`, `n_effective`, `correlation`); `MFCFLoGoCVAll` can tune `alpha`
+`n_starts`, `shrinkage`, `n_effective`, `correlation`, `similarity` and the
+`mi_*` options); `MFCFLoGoCVAll` can tune `alpha`
 (`tunable_params=("alpha", ...)`). Their `precision_` and `covariance_` are on
 the covariance scale of the data (earlier versions returned the precision of
 the correlation matrix).
@@ -193,6 +206,26 @@ threshold alike, capturing 60-90% of the gain of trying every vertex as a
 start. With `"sumsquares"` and `"sum"` the gain was negligible. The default
 (`n_starts=None`) is therefore `max_clique_size` starts for `"loglik"` and a
 single start for the weight gains. Pass `n_starts=1` for the fastest run.
+
+### Compatibility with earlier versions
+
+This package merges three lines of development; code written for any of them
+keeps working.
+
+| Earlier code | What to use now |
+|---|---|
+| original `fast_fast_mfcf`: `MFCF().fast_mfcf(C, mfcf_control(), "sumsquares")` | still accepted (DeprecationWarning); the control dictionary maps onto the options below, including `drop_sep` and `method="TMFG"` |
+| toolkit `main`: `MFCF(threshold=..., max_clique_size=...).run(C)` | same call; add `gain_function_type="sumsquares", new_component="first"` for identical results |
+| `mutual_info` branch: `MFCFLoGo(similarity="mutual_information", mi_estimator=...)`, `fit(X, mi_matrix=..., cov_matrix=...)` | same call (pass `gain_function_type="sumsquares"`, the default of that branch) |
+
+Options of the original implementation: `drop_sep=True` uses each separator
+for at most one attachment, and `seed="tmfg"` starts from the four vertices
+with the largest sums of above-mean squared weights, as in the TMFG.
+Through the legacy call, results equal those of the original implementation
+(with its later bug fixes) in 98% of 1836 tested configurations; the others
+combine `coordination_number=1` with a positive threshold, where the two
+implementations treat a separator at its cap differently and both return
+valid clique forests.
 
 ### Precision Estimation (`MFCFLoGO()`)
 ```python

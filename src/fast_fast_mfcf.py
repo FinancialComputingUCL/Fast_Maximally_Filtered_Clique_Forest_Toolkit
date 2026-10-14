@@ -446,6 +446,23 @@ def _check_covariance(C: np.ndarray, gain: str = "loglik") -> None:
         raise ValueError(msg) from None
 
 
+def _check_correlation_like(C: np.ndarray) -> None:
+    """For "sumsquares": a covariance, correlation or other correlation
+    coefficient matrix (e.g. Linfoot's information coefficient): symmetric,
+    positive diagonal and |C_ij| <= sqrt(C_ii C_jj). Positive
+    semi-definiteness is not needed for this gain."""
+    msg = ("gain_function_type='sumsquares' requires a covariance or correlation "
+           "matrix (symmetric, positive diagonal, |C_ij| <= sqrt(C_ii C_jj)); for a "
+           "non-negative weight matrix use gain_function_type='sum'")
+    if C.ndim != 2 or C.shape[0] != C.shape[1] or not np.allclose(C, C.T, atol=1e-10):
+        raise ValueError(msg)
+    d = np.diag(C)
+    if np.any(d <= 0) or not np.all(np.isfinite(C)):
+        raise ValueError(msg)
+    if np.any(np.abs(C) > np.sqrt(np.outer(d, d)) * (1 + 1e-8) + 1e-12):
+        raise ValueError(msg)
+
+
 def _check_nonnegative(W: np.ndarray) -> None:
     off = W[~np.eye(W.shape[0], dtype=bool)] if W.ndim == 2 and W.shape[0] == W.shape[1] else W
     if np.any(off < 0):
@@ -464,6 +481,20 @@ _DEFAULT_CHANGE_MSG = (
     "gain_function_type explicitly to silence this warning; for the results "
     "of earlier versions use gain_function_type='sumsquares', "
     "new_component='first'.")
+
+
+def mfcf_control() -> dict:
+    """Default control dictionary of the original implementation, for
+    ``MFCF().fast_mfcf(C, ctl, gf_type)`` (deprecated interface)."""
+    return {
+        "min_clique_size": 1,
+        "max_clique_size": 4,
+        "coordination_number": np.inf,
+        "cachesize": np.inf,
+        "threshold": 0.00,
+        "drop_sep": True,
+        "method": "MFCF",
+    }
 
 
 def _kendall_tau_b(X: np.ndarray, block: int = 256, gram_max_n: int = 2000) -> np.ndarray:
@@ -608,7 +639,7 @@ class Gains:
         # vertex used to start a new component (default: lowest index)
         self._root = root_chooser or (lambda mask: int(np.argmax(mask)))
         if gf_type == "sumsquares":
-            _check_covariance(np.asarray(C, dtype=float), "sumsquares")
+            _check_correlation_like(np.asarray(C, dtype=float))
             self._W = np.square(C)
         elif gf_type == "sum":
             self._W = np.asarray(C, dtype=float)
@@ -1076,6 +1107,14 @@ class MFCF:
         where it improves the fit to new data under every acceptance rule,
         and 1 for the weight gains, where it brings little. ``start_``
         records the start chosen.
+    drop_sep : bool, default=False
+        If True, a separator is used for at most one attachment (option of
+        the original implementation).
+    seed : {"strongest", "tmfg"}, default="strongest"
+        First clique: the strongest vertex (or the ``min_clique_size - 1``
+        strongest), or the four vertices with the largest sums of above-mean
+        squared weights, as in the TMFG (option of the original
+        implementation; needs ``max_clique_size >= 4``).
 
     Notes
     -----
@@ -1109,14 +1148,23 @@ class MFCF:
         n_samples: Optional[int] = None,
         new_component: str = "strongest",
         n_starts: Optional[int] = None,
+        drop_sep: bool = False,
+        seed: str = "strongest",
     ) -> None:
+        self._gain_unset = gain_function_type is None    # FutureWarning at the first run
         if gain_function_type is None:
-            warnings.warn(_DEFAULT_CHANGE_MSG, FutureWarning, stacklevel=2)
             gain_function_type = "loglik"
+        if seed not in ("strongest", "tmfg"):
+            raise ValueError("seed must be 'strongest' or 'tmfg'")
+        if seed == "tmfg" and max_clique_size < 4:
+            raise ValueError("seed='tmfg' needs max_clique_size >= 4")
+        self._seed = seed
+        self._drop_sep = bool(drop_sep)
         _check_options(gain_function_type, acceptance, alpha, n_samples, require_n=False)
         if new_component not in ("strongest", "first"):
             raise ValueError("new_component must be 'strongest' or 'first'")
         self._new_component = new_component
+        self._n_starts_auto = n_starts is None
         if n_starts is None:          # several starts pay off with the likelihood objective
             n_starts = int(min(max_clique_size, 1e9)) if gain_function_type == "loglik" else 1
         if (isinstance(n_starts, bool) or not isinstance(n_starts, (int, np.integer))
@@ -1133,6 +1181,32 @@ class MFCF:
         self._acceptance = acceptance
         self._alpha = alpha
         self._n_samples = n_samples
+
+    def fast_mfcf(self, C: np.ndarray, ctl: dict, gf_type: str = "sumsquares",
+                  cov_matrix: Optional[np.ndarray] = None):
+        """Interface of the original implementation (deprecated):
+        ``MFCF().fast_mfcf(C, mfcf_control(), "sumsquares")``. The control
+        dictionary is mapped onto the keyword options (``method="TMFG"`` to
+        ``seed="tmfg"``) and the run uses the original rule for new
+        components and a single start. Returns
+        ``cliques, separators_count, peo, J``."""
+        warnings.warn("MFCF().fast_mfcf(C, ctl, gf_type) is deprecated; use "
+                      "MFCF(**options).run(C) or .fit(X)", DeprecationWarning, stacklevel=2)
+        method = ctl.get("method", "MFCF")
+        if method not in ("MFCF", "TMFG"):
+            raise ValueError(f"Unknown method: {method}")
+        m = MFCF(threshold=ctl.get("threshold", 0.0),
+                 min_clique_size=ctl.get("min_clique_size", 1),
+                 max_clique_size=ctl.get("max_clique_size", 4),
+                 coordination_number=ctl.get("max_separator_multiplicity",
+                                             ctl.get("coordination_number", np.inf)),
+                 gain_function_type=gf_type, drop_sep=ctl.get("drop_sep", False),
+                 seed="tmfg" if method == "TMFG" else "strongest",
+                 new_component="first", n_starts=1)
+        m._legacy_seed = True
+        out = m.run(C, cov_matrix=cov_matrix)
+        self.__dict__.update(m.__dict__)
+        return out
 
     def run(
         self,
@@ -1168,6 +1242,9 @@ class MFCF:
           you need multiple independent runs in parallel.
         - Logging at INFO/DEBUG provides a step-by-step trace.
         """
+        if self._gain_unset:
+            warnings.warn(_DEFAULT_CHANGE_MSG, FutureWarning, stacklevel=2)
+            self._gain_unset = False
         self._C = C
         best = None
         seeds = self._start_seeds(min(self._n_starts, C.shape[0]))
@@ -1249,7 +1326,8 @@ class MFCF:
     def _fast_path_applies(self) -> bool:
         """Direct path: weight gains, threshold 0, min_clique_size <= 1, Numba."""
         return (_HAS_NUMBA and self._use_fast_path and self._gf_type in ("sumsquares", "sum")
-                and self._threshold == 0.0 and self._min_clique_size <= 1)
+                and self._threshold == 0.0 and self._min_clique_size <= 1
+                and not self._drop_sep and self._seed == "strongest")
 
     def _build_fast(self) -> None:
         """Direct algorithm for the weight gains with ``threshold == 0`` and
@@ -1260,7 +1338,7 @@ class MFCF:
         C = np.asarray(self._C, dtype=np.float64)
         p = int(C.shape[0])
         if self._gf_type == "sumsquares":
-            _check_covariance(C, "sumsquares")
+            _check_correlation_like(C)
             W = np.asfortranarray(np.square(C))
         else:
             _check_nonnegative(C)
@@ -1595,6 +1673,14 @@ class MFCF:
         shrinkage: float = 0.0,
         n_effective=None,
         correlation: str = "pearson",
+        similarity: str = "correlation",
+        mi_estimator: str = "ksg",
+        mi_n_neighbors: int = 3,
+        mi_n_bins="auto",
+        mi_normalize: str = "linfoot",
+        mi_n_jobs: Optional[int] = None,
+        mi_random_state: Optional[int] = None,
+        mi_matrix: Optional[np.ndarray] = None,
     ) -> "MFCF":
         """
         Build the clique forest and a precision estimate directly from data.
@@ -1625,6 +1711,18 @@ class MFCF:
             acceptance rules then hold approximately. "spearman" costs about
             as much as "pearson" and is recommended for long series; "kendall"
             costs O(p^2 n log n) (a few seconds for p = 50, n = 20000).
+        similarity : {"correlation", "mutual_information"}, default="correlation"
+            Dependence measure on which the structure is built. "correlation"
+            uses `correlation`. "mutual_information" uses the pairwise mutual
+            information in Linfoot's normalisation ``sqrt(1 - exp(-2 I))``
+            (see `mutual_information.mutual_information_matrix`), which
+            captures non-linear and tail dependence; it requires the
+            "sumsquares" or "sum" gain ("sumsquares" if the gain is unset). The precision is assembled from the
+            correlation blocks in either case.
+        mi_estimator, mi_n_neighbors, mi_n_bins, mi_normalize, mi_n_jobs, mi_random_state
+            Options of the mutual-information estimator ("ksg" or "histogram").
+        mi_matrix : np.ndarray, optional
+            Precomputed mutual-information similarity (skips the estimation).
 
         Returns
         -------
@@ -1676,14 +1774,38 @@ class MFCF:
             if not 3 <= n_eff <= n:
                 raise ValueError("n_effective must lie between 3 and n_samples")
 
+        if similarity == "correlation":
+            S = R
+        elif similarity == "mutual_information":
+            if self._gain_unset:      # as in the mutual_info branch: sum of squares
+                self._gf_type, self._gain_unset = "sumsquares", False
+                if self._n_starts_auto:
+                    self._n_starts = 1
+            if self._gf_type == "loglik":
+                raise ValueError(
+                    "similarity='mutual_information' needs gain_function_type='sumsquares' "
+                    "or 'sum' (the information matrix is not a covariance)")
+            if mi_matrix is not None:
+                S = np.asarray(mi_matrix, dtype=float)
+                if S.shape != (p, p):
+                    raise ValueError("mi_matrix must have shape (n_features, n_features)")
+            else:
+                from mutual_information import mutual_information_matrix
+                S = mutual_information_matrix(
+                    X, estimator=mi_estimator, n_neighbors=mi_n_neighbors, n_bins=mi_n_bins,
+                    normalize=mi_normalize, n_jobs=mi_n_jobs, random_state=mi_random_state)
+        else:
+            raise ValueError("similarity must be 'correlation' or 'mutual_information'")
+
         saved = self._n_samples
         if self._acceptance != "threshold":
             self._n_samples = n_eff
         try:
             R_shrunk = (1 - shrinkage) * R + shrinkage * np.eye(p)
-            cliques, seps, peo, J = self.run(C=R, cov_matrix=R_shrunk)
+            cliques, seps, peo, J = self.run(C=S, cov_matrix=R_shrunk)
         finally:
             self._n_samples = saved
+        self.similarity_ = S
 
         self.cliques_, self.separators_, self.peo_ = cliques, seps, peo
         self.correlation_ = R
@@ -1720,6 +1842,7 @@ class MFCF:
 
         self._separators_count: Counter = Counter()
         self._pq_separators: set[Separator] = set()
+        self._seen_separators: set[Separator] = set()
 
         self._peo: List[Node] = [v for v in first_cl]  # Perfect elimination order
         self._outstanding_nodes_mask = np.ones(self._C.shape[0], dtype=bool)
@@ -1745,6 +1868,15 @@ class MFCF:
         """
         if self._seed_override is not None:
             return self._seed_override
+        if getattr(self, "_legacy_seed", False) and self._seed == "strongest":
+            # original implementation: a single seed vertex for any min_clique_size
+            C1 = self._C.copy()
+            C1[self._C <= self._C.mean()] = 0
+            return frozenset([int(np.argsort(-C1.sum(axis=0), kind="stable")[0])])
+        if self._seed == "tmfg":
+            W = np.square(np.asarray(self._C, dtype=float))
+            v = np.sum(W * (W > W.mean()), axis=1)
+            return frozenset(int(x) for x in np.argsort(-v, kind="stable")[:4])
         C1 = self._C.copy()
         r, c = np.nonzero(self._C <= self._C.mean())
         C1[r, c] = 0
@@ -1823,6 +1955,8 @@ class MFCF:
         sep = sep_wrapper.separator
         # multiplicity constraint
         if self._separators_count[sep] >= self._coordination_number:
+            return True
+        if self._drop_sep and (sep in self._seen_separators or self._separators_count[sep] > 0):
             return True
         if np.isnan(gain):
             return True
@@ -1967,6 +2101,8 @@ class MFCF:
         if not sep:
             # Empty separator, nothing to record
             return
+        if self._drop_sep:
+            self._seen_separators.add(sep)
 
         if not (self._min_clique_size - 1 <= len(sep) < self._max_clique_size):
             return

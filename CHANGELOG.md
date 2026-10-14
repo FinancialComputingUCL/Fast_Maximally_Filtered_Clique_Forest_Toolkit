@@ -26,6 +26,15 @@ other weight matrices are no longer accepted; use `"sum"` on non-negative
 weights.
 
 ### Added
+- Merge of the `mutual_info` branch: `mutual_information` module (KSG and
+  histogram estimators, Linfoot normalisation; A. Briola) and the
+  `similarity` / `mi_*` options of `MFCFLoGo`, with its `fit(X, corr_matrix,
+  mi_matrix, cov_matrix)` interface; `MFCF.fit(X, similarity=
+  "mutual_information")`. `"sumsquares"` accepts any matrix of correlation
+  coefficients (positive semi-definiteness is needed only by `"loglik"`).
+- Options of the original `fast_fast_mfcf`: `drop_sep`, `seed="tmfg"`, and
+  its interface `MFCF().fast_mfcf(C, mfcf_control(), gf_type)`
+  (deprecated).
 - Statistical acceptance of each attachment: partial F-test
   (`acceptance="ftest"`, level `alpha`) and BIC (`acceptance="bic"`), as
   alternatives to the fixed `threshold`.

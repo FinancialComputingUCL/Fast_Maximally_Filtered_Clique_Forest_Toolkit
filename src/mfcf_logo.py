@@ -67,6 +67,15 @@ class MFCFLoGo(EmpiricalCovariance):
         Correlation used for the structure and the precision; the rank options
         estimate the Gaussian-copula correlation (see `MFCF.fit`).
 
+    similarity : {'correlation', 'mutual_information'}, default='correlation'
+        Dependence measure for the structure. 'mutual_information' uses the
+        pairwise mutual information (Linfoot normalisation) and requires the
+        'sumsquares' or 'sum' gain; the precision is assembled from the
+        correlation blocks (see `MFCF.fit`).
+
+    mi_estimator, mi_n_neighbors, mi_n_bins, mi_normalize, mi_n_jobs, mi_random_state
+        Options of the mutual-information estimator ('ksg' or 'histogram').
+
     assume_centered : bool, default=False
         If True, data are not centered before computation.
         Useful when working with data whose mean is almost, but not exactly
@@ -109,6 +118,13 @@ class MFCFLoGo(EmpiricalCovariance):
         shrinkage: float = 0.0,
         n_effective=None,
         correlation: str = "pearson",
+        similarity: str = "correlation",
+        mi_estimator: str = "ksg",
+        mi_n_neighbors: int = 3,
+        mi_n_bins="auto",
+        mi_normalize: str = "linfoot",
+        mi_n_jobs: Optional[int] = None,
+        mi_random_state: Optional[int] = None,
         assume_centered: bool = False,
     ):
         super().__init__(assume_centered=assume_centered)
@@ -124,8 +140,45 @@ class MFCFLoGo(EmpiricalCovariance):
         self.shrinkage = shrinkage
         self.n_effective = n_effective
         self.correlation = correlation
+        self.similarity = similarity
+        self.mi_estimator = mi_estimator
+        self.mi_n_neighbors = mi_n_neighbors
+        self.mi_n_bins = mi_n_bins
+        self.mi_normalize = mi_normalize
+        self.mi_n_jobs = mi_n_jobs
+        self.mi_random_state = mi_random_state
 
-    def fit(self, X: np.ndarray, y=None) -> "MFCFLoGo":
+    def _fit_precomputed(self, builder, X, corr_matrix, mi_matrix, cov_matrix):
+        """Interface of the `mutual_info` branch: run on precomputed matrices."""
+        from sklearn.covariance import empirical_covariance
+        if self.similarity == "mutual_information" and builder._gain_unset:
+            builder._gf_type, builder._gain_unset = "sumsquares", False
+            if builder._n_starts_auto:
+                builder._n_starts = 1
+        if self.similarity == "correlation":
+            C = corr_matrix if corr_matrix is not None else np.corrcoef(X, rowvar=False)
+            cov = cov_matrix if cov_matrix is not None else C
+        elif self.similarity == "mutual_information":
+            if mi_matrix is not None:
+                C = mi_matrix
+            else:
+                from mutual_information import mutual_information_matrix
+                C = mutual_information_matrix(
+                    X, estimator=self.mi_estimator, n_neighbors=self.mi_n_neighbors,
+                    n_bins=self.mi_n_bins, normalize=self.mi_normalize,
+                    n_jobs=self.mi_n_jobs, random_state=self.mi_random_state)
+            cov = (cov_matrix if cov_matrix is not None
+                   else empirical_covariance(X, assume_centered=self.assume_centered))
+        else:
+            raise ValueError("similarity must be 'correlation' or 'mutual_information'")
+        cliques, seps, peo, J = builder.run(C=C, cov_matrix=cov)
+        self.cliques_, self.separators_count_, self.peo_ = cliques, seps, peo
+        self.n_effective_ = float(X.shape[0])
+        self.precision_ = J
+
+    def fit(self, X: np.ndarray, y=None, corr_matrix: Optional[np.ndarray] = None,
+            mi_matrix: Optional[np.ndarray] = None,
+            cov_matrix: Optional[np.ndarray] = None) -> "MFCFLoGo":
         """Fit the estimator from data X.
 
         Parameters
@@ -135,6 +188,17 @@ class MFCFLoGo(EmpiricalCovariance):
 
         y : Ignored
             Not used, present for API consistency by convention.
+
+        corr_matrix, mi_matrix, cov_matrix : np.ndarray, optional
+            Precomputed matrices (interface of the `mutual_info` branch):
+            the similarity for the structure (`corr_matrix` with
+            similarity='correlation', `mi_matrix` with
+            similarity='mutual_information') and the matrix whose blocks are
+            assembled into the precision (`cov_matrix`). With `corr_matrix` or
+            `cov_matrix` the precision is on the scale of that matrix (by
+            default the correlation, or the empirical covariance for mutual
+            information) and the options `shrinkage`, `n_effective` and
+            `correlation` are not used.
 
         Returns
         -------
@@ -166,18 +230,23 @@ class MFCFLoGo(EmpiricalCovariance):
             new_component=self.new_component,
             n_starts=self.n_starts,
         )
-        # structure from the sample correlation; precision on the covariance
-        # scale of X (LoGo of the correlation blocks rescaled by the variances)
-        builder.fit(X, assume_centered=self.assume_centered,
-                    shrinkage=self.shrinkage, n_effective=self.n_effective,
-                    correlation=self.correlation)
-
-        self.cliques_ = builder.cliques_
-        self.separators_count_ = builder.separators_
-        self.peo_ = builder.peo_
-        self.n_effective_ = builder.n_effective_
-
-        self.precision_ = builder.precision_
+        if corr_matrix is not None or cov_matrix is not None:
+            self._fit_precomputed(builder, X, corr_matrix, mi_matrix, cov_matrix)
+        else:
+            # structure from the chosen similarity; precision on the covariance
+            # scale of X (LoGo of the correlation blocks rescaled by the variances)
+            builder.fit(X, assume_centered=self.assume_centered,
+                        shrinkage=self.shrinkage, n_effective=self.n_effective,
+                        correlation=self.correlation, similarity=self.similarity,
+                        mi_estimator=self.mi_estimator, mi_n_neighbors=self.mi_n_neighbors,
+                        mi_n_bins=self.mi_n_bins, mi_normalize=self.mi_normalize,
+                        mi_n_jobs=self.mi_n_jobs, mi_random_state=self.mi_random_state,
+                        mi_matrix=mi_matrix)
+            self.cliques_ = builder.cliques_
+            self.separators_count_ = builder.separators_
+            self.peo_ = builder.peo_
+            self.n_effective_ = builder.n_effective_
+            self.precision_ = builder.precision_
         if self.store_precision and not np.all(np.isfinite(self.precision_)):
             raise ValueError("Computed precision_ contains non-finite values.")
 
@@ -356,6 +425,13 @@ class MFCFLoGoCV(EmpiricalCovariance):
         shrinkage: float = 0.0,
         n_effective=None,
         correlation: str = "pearson",
+        similarity: str = "correlation",
+        mi_estimator: str = "ksg",
+        mi_n_neighbors: int = 3,
+        mi_n_bins="auto",
+        mi_normalize: str = "linfoot",
+        mi_n_jobs: Optional[int] = None,
+        mi_random_state: Optional[int] = None,
         assume_centered: bool = False,
         # scoring / robustness
         error_score: Union[str, float] = np.nan,
@@ -377,6 +453,13 @@ class MFCFLoGoCV(EmpiricalCovariance):
         self.shrinkage = shrinkage
         self.n_effective = n_effective
         self.correlation = correlation
+        self.similarity = similarity
+        self.mi_estimator = mi_estimator
+        self.mi_n_neighbors = mi_n_neighbors
+        self.mi_n_bins = mi_n_bins
+        self.mi_normalize = mi_normalize
+        self.mi_n_jobs = mi_n_jobs
+        self.mi_random_state = mi_random_state
         self.assume_centered = assume_centered
 
         self.error_score = error_score
@@ -461,6 +544,13 @@ class MFCFLoGoCV(EmpiricalCovariance):
                         shrinkage=self.shrinkage,
                         n_effective=self.n_effective,
                         correlation=self.correlation,
+                        similarity=self.similarity,
+                        mi_estimator=self.mi_estimator,
+                        mi_n_neighbors=self.mi_n_neighbors,
+                        mi_n_bins=self.mi_n_bins,
+                        mi_normalize=self.mi_normalize,
+                        mi_n_jobs=self.mi_n_jobs,
+                        mi_random_state=self.mi_random_state,
                         assume_centered=self.assume_centered,
                     )
                     base.fit(X_tr)
@@ -528,6 +618,13 @@ class MFCFLoGoCV(EmpiricalCovariance):
             shrinkage=self.shrinkage,
             n_effective=self.n_effective,
             correlation=self.correlation,
+            similarity=self.similarity,
+            mi_estimator=self.mi_estimator,
+            mi_n_neighbors=self.mi_n_neighbors,
+            mi_n_bins=self.mi_n_bins,
+            mi_normalize=self.mi_normalize,
+            mi_n_jobs=self.mi_n_jobs,
+            mi_random_state=self.mi_random_state,
             assume_centered=self.assume_centered,
         )
         final.fit(X)
@@ -711,6 +808,13 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         shrinkage: float = 0.0,
         n_effective=None,
         correlation: str = "pearson",
+        similarity: str = "correlation",
+        mi_estimator: str = "ksg",
+        mi_n_neighbors: int = 3,
+        mi_n_bins="auto",
+        mi_normalize: str = "linfoot",
+        mi_n_jobs: Optional[int] = None,
+        mi_random_state: Optional[int] = None,
         assume_centered: bool = False,
         # scoring / robustness
         error_score: Union[str, float] = np.nan,
@@ -735,6 +839,13 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         self.shrinkage = shrinkage
         self.n_effective = n_effective
         self.correlation = correlation
+        self.similarity = similarity
+        self.mi_estimator = mi_estimator
+        self.mi_n_neighbors = mi_n_neighbors
+        self.mi_n_bins = mi_n_bins
+        self.mi_normalize = mi_normalize
+        self.mi_n_jobs = mi_n_jobs
+        self.mi_random_state = mi_random_state
         self.assume_centered = assume_centered
 
         self.error_score = error_score
@@ -753,6 +864,13 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             shrinkage=self.shrinkage,
             n_effective=self.n_effective,
             correlation=self.correlation,
+            similarity=self.similarity,
+            mi_estimator=self.mi_estimator,
+            mi_n_neighbors=self.mi_n_neighbors,
+            mi_n_bins=self.mi_n_bins,
+            mi_normalize=self.mi_normalize,
+            mi_n_jobs=self.mi_n_jobs,
+            mi_random_state=self.mi_random_state,
         )
         if not self.tunable_params:
             return params
@@ -834,6 +952,13 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             shrinkage=self.shrinkage,
             n_effective=self.n_effective,
             correlation=self.correlation,
+            similarity=self.similarity,
+            mi_estimator=self.mi_estimator,
+            mi_n_neighbors=self.mi_n_neighbors,
+            mi_n_bins=self.mi_n_bins,
+            mi_normalize=self.mi_normalize,
+            mi_n_jobs=self.mi_n_jobs,
+            mi_random_state=self.mi_random_state,
         )
         final_params.update(best_params)
         if final_params["n_starts"] is not None:

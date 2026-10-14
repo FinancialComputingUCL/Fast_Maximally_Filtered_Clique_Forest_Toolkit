@@ -279,9 +279,11 @@ def test_new_component_option():
 
 def test_future_warning_for_unset_gain():
     import warnings
-    with pytest.warns(FutureWarning, match="sumsquares"):
-        m = MFCF()
+    m = MFCF()                                        # no warning until it runs
     assert m._gf_type == "loglik"
+    C = np.corrcoef(np.random.default_rng(0).standard_normal((50, 6)), rowvar=False)
+    with pytest.warns(FutureWarning, match="sumsquares"):
+        m.run(C)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         MFCF(gain_function_type="loglik")

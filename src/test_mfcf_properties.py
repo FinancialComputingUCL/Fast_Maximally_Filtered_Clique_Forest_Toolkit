@@ -558,3 +558,114 @@ def test_direct_path_not_used_outside_its_regime():
     for kw in (dict(gain_function_type="loglik"), dict(gain_function_type="sumsquares", threshold=0.1),
                dict(gain_function_type="sumsquares", min_clique_size=3)):
         assert not MFCF(max_clique_size=4, **kw)._fast_path_applies()
+
+
+# ------------------------------------------- mutual information similarity
+def test_mutual_information_similarity_in_fit():
+    rng = np.random.default_rng(11)
+    X = rng.standard_normal((400, 8)) @ rng.standard_normal((8, 8))
+    m = MFCF(gain_function_type="sumsquares", max_clique_size=3).fit(
+        X, similarity="mutual_information", mi_estimator="histogram")
+    S = m.similarity_
+    assert np.allclose(np.diag(S), 1) and S.min() >= 0 and S.max() <= 1
+    assert np.all(np.isfinite(m.precision_))
+    # precomputed matrix gives the same structure
+    m2 = MFCF(gain_function_type="sumsquares", max_clique_size=3).fit(
+        X, similarity="mutual_information", mi_matrix=S)
+    assert {frozenset(q) for q in m.cliques_} == {frozenset(q) for q in m2.cliques_}
+    with pytest.raises(ValueError, match="mutual_information"):
+        MFCF(gain_function_type="loglik").fit(X, similarity="mutual_information", mi_matrix=S)
+    import warnings
+    with warnings.catch_warnings():                 # unset gain: sumsquares, as before
+        warnings.simplefilter("error")
+        m3 = MFCF(max_clique_size=3).fit(X, similarity="mutual_information", mi_matrix=S)
+    assert m3._gf_type == "sumsquares" and m3._n_starts == 1
+    assert {frozenset(q) for q in m3.cliques_} == {frozenset(q) for q in m2.cliques_}
+    with pytest.raises(ValueError):
+        MFCF(gain_function_type="sumsquares").fit(X, similarity="distance")
+
+
+def test_mutual_information_finds_nonlinear_dependence():
+    """Chain of non-monotone links (y = z^2 + noise, z a symmetric score of x):
+    the first link has zero correlation, so the correlation-based tree misses
+    it, while the mutual-information tree recovers the whole chain."""
+    rng = np.random.default_rng(12)
+    n, p = 2000, 6
+    X = np.zeros((n, p))
+    X[:, 0] = rng.standard_normal(n)
+    for v in range(1, p):
+        z = stats.norm.ppf(stats.rankdata(X[:, v - 1]) / (n + 1))   # symmetric score
+        X[:, v] = z ** 2 - 1 + 0.3 * rng.standard_normal(n)
+    chain = {frozenset((v - 1, v)) for v in range(1, p)}
+    mi = MFCF(gain_function_type="sumsquares", max_clique_size=2).fit(
+        X, similarity="mutual_information", mi_estimator="ksg")
+    assert {frozenset(q) for q in mi.cliques_} == chain
+    corr = MFCF(gain_function_type="sumsquares", max_clique_size=2).fit(X)
+    assert {frozenset(q) for q in corr.cliques_} != chain
+
+
+def test_mfcflogo_mutual_information_interfaces():
+    from mfcf_logo import MFCFLoGo
+    rng = np.random.default_rng(13)
+    X = rng.standard_normal((300, 7)) @ rng.standard_normal((7, 7))
+    a = MFCFLoGo(gain_function_type="sumsquares", similarity="mutual_information",
+                 mi_estimator="histogram").fit(X)
+    assert np.all(np.isfinite(a.precision_)) and a.get_params()["similarity"] == "mutual_information"
+    # interface of the mutual_info branch: precomputed similarity and covariance
+    from mutual_information import mutual_information_matrix
+    S = mutual_information_matrix(X, estimator="histogram")
+    b = MFCFLoGo(gain_function_type="sumsquares", similarity="mutual_information").fit(
+        X, mi_matrix=S, cov_matrix=np.cov(X, rowvar=False, bias=True))
+    assert {frozenset(q) for q in a.cliques_} == {frozenset(q) for q in b.cliques_}
+    c = MFCFLoGo(gain_function_type="sumsquares").fit(X, corr_matrix=np.corrcoef(X, rowvar=False))
+    assert np.all(np.isfinite(c.precision_))
+
+
+def test_sumsquares_accepts_correlation_coefficients_not_weights():
+    S = np.array([[1, .9, .9], [.9, 1, 0.], [.9, 0., 1]])      # valid coefficients, not PSD
+    assert np.linalg.eigvalsh(S).min() < 0
+    MFCF(gain_function_type="sumsquares", max_clique_size=2).run(S)
+    W = np.array([[1, 2., .5], [2., 1, .3], [.5, .3, 1]])       # weights above 1
+    with pytest.raises(ValueError, match="sum"):
+        MFCF(gain_function_type="sumsquares").run(W)
+
+
+# ------------------------------------------------- original-code options
+def test_drop_sep_uses_each_separator_once():
+    R = _sample_corr(4, p=40, n=200)
+    m = MFCF(gain_function_type="sumsquares", max_clique_size=4, drop_sep=True)
+    assert not m._fast_path_applies()
+    cl, seps, peo, J = m.run(R)
+    assert max(seps.values()) == 1
+    assert sorted(int(v) for v in peo) == list(range(40))
+    assert nx.is_chordal(nx.from_numpy_array(_edges(cl, 40).astype(int)))
+    base = MFCF(gain_function_type="sumsquares", max_clique_size=4).run(R)[1]
+    assert max(base.values()) > 1                                  # the option matters here
+
+
+def test_tmfg_seed():
+    R = _sample_corr(5, p=20, n=200)
+    with pytest.raises(ValueError):
+        MFCF(gain_function_type="sumsquares", max_clique_size=3, seed="tmfg")
+    with pytest.raises(ValueError):
+        MFCF(seed="other")
+    m = MFCF(gain_function_type="sumsquares", max_clique_size=4, seed="tmfg", n_starts=1)
+    cl, _, peo, _ = m.run(R)
+    W = R ** 2
+    top4 = set(np.argsort(-np.sum(W * (W > W.mean()), axis=1), kind="stable")[:4].tolist())
+    assert set(int(v) for v in peo[:4]) == top4
+    assert all(len(q) == 4 for q in cl)                            # a TMFG-type graph
+
+
+def test_original_interface():
+    from fast_fast_mfcf import mfcf_control
+    R = _sample_corr(6, p=25, n=200)
+    ctl = mfcf_control()
+    assert ctl["drop_sep"] is True and ctl["method"] == "MFCF"
+    ctl.update(max_clique_size=4, drop_sep=False)
+    with pytest.warns(DeprecationWarning):
+        cl, seps, peo, J = MFCF().fast_mfcf(R, ctl, "sumsquares")
+    ref = MFCF(gain_function_type="sumsquares", max_clique_size=4, new_component="first", n_starts=1).run(R)
+    assert {frozenset(q) for q in cl} == {frozenset(q) for q in ref[0]} and seps == ref[1]
+    with pytest.raises(ValueError), pytest.warns(DeprecationWarning):
+        MFCF().fast_mfcf(R, dict(ctl, method="PMFG"), "sumsquares")

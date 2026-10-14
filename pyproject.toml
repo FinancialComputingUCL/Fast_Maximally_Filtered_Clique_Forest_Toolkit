@@ -25,7 +25,7 @@ test = ["pytest", "pytest-timeout", "networkx", "scikit-learn>=1.2", "optuna>=3"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-py-modules = ["fast_fast_mfcf", "mfcf_logo", "mfcf_dbht"]
+py-modules = ["fast_fast_mfcf", "mfcf_logo", "mfcf_dbht", "mutual_information"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
