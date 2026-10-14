@@ -188,7 +188,7 @@ def test_ftest_rejects_independent_noise():
 def test_option_validation():
     C = _corr(10, 0, "sector")
     with pytest.raises(ValueError):
-        MFCF(acceptance="ftest")                                  # needs n_samples
+        MFCF(acceptance="ftest").run(C)                           # needs n_samples
     with pytest.raises(ValueError):
         MFCF(gain_function_type="sumsquares", acceptance="bic", n_samples=50)
     with pytest.raises(ValueError):
@@ -211,3 +211,60 @@ def test_weight_matrix_without_logo():
     W = rng.uniform(0, 1, (15, 15)); W = (W + W.T) / 2; np.fill_diagonal(W, 0.0)
     cl, seps, peo, J = MFCF(gain_function_type="sum", max_clique_size=4).run(W)
     assert sorted(int(v) for v in peo) == list(range(15))
+
+
+
+# --------------------------------------------------------------------------
+# building directly from data: MFCF.fit(X)
+# --------------------------------------------------------------------------
+def _data(n=400, p=25, seed=0):
+    rng = np.random.default_rng(seed)
+    return rng.standard_normal((n, 3)) @ rng.standard_normal((3, p)) + rng.standard_normal((n, p))
+
+
+def test_fit_matches_run_on_correlation_and_is_scale_invariant():
+    X = _data()
+    C = np.corrcoef(X, rowvar=False)
+    m = MFCF(max_clique_size=5).fit(X)
+    cl, seps, peo, J = MFCF(max_clique_size=5).run(C)
+    assert {frozenset(q) for q in m.cliques_} == {frozenset(q) for q in cl}
+    s = np.random.default_rng(1).uniform(0.1, 10, X.shape[1])
+    m2 = MFCF(max_clique_size=5).fit(X * s)
+    assert {frozenset(q) for q in m2.cliques_} == {frozenset(q) for q in m.cliques_}
+    assert np.allclose(m2.precision_, m.precision_ / np.outer(s, s))
+
+
+def test_fit_precision_is_decomposable_mle():
+    X = _data(n=500, p=20, seed=2)
+    m = MFCF(max_clique_size=4).fit(X)
+    S = np.cov(X, rowvar=False, bias=True)
+    for q in m.cliques_:
+        q = sorted(q)
+        assert np.allclose(m.covariance_[np.ix_(q, q)], S[np.ix_(q, q)], atol=1e-8)
+    assert np.allclose(np.linalg.inv(m.precision_), m.covariance_, atol=1e-8)
+
+
+def test_fit_sets_n_for_statistical_acceptance():
+    X = _data()
+    m = MFCF(max_clique_size=6, acceptance="ftest", alpha=0.01).fit(X)
+    assert m.n_effective_ == X.shape[0]
+    cl, _, _, _ = MFCF(max_clique_size=6, acceptance="ftest", alpha=0.01,
+                       n_samples=X.shape[0]).run(np.corrcoef(X, rowvar=False))
+    assert {frozenset(q) for q in m.cliques_} == {frozenset(q) for q in cl}
+
+
+def test_effective_sample_size():
+    rng = np.random.default_rng(3)
+    n, p = 4000, 10
+    assert MFCF(acceptance="bic").fit(rng.standard_normal((n, p)), n_effective="auto").n_effective_ > 0.9 * n
+    phi = 0.8                                        # AR(1) series: n_eff ~ n (1 - phi^2) / (1 + phi^2)
+    e = rng.standard_normal((n, p)); X = np.zeros((n, p))
+    for t in range(1, n):
+        X[t] = phi * X[t - 1] + e[t]
+    neff = MFCF(acceptance="bic").fit(X, n_effective="auto").n_effective_
+    assert abs(neff / (n * (1 - phi**2) / (1 + phi**2)) - 1) < 0.15
+
+
+def test_fit_rejects_weight_gain():
+    with pytest.raises(ValueError):
+        MFCF(gain_function_type="sumsquares").fit(_data())

@@ -160,7 +160,7 @@ GAIN_TYPES = ("loglik", "sumsquares", "sum")
 ACCEPTANCE_RULES = ("threshold", "ftest", "bic")
 
 
-def _check_options(gf_type, acceptance, alpha, n_samples) -> None:
+def _check_options(gf_type, acceptance, alpha, n_samples, require_n: bool = True) -> None:
     if gf_type not in GAIN_TYPES:
         raise ValueError(f"Unknown gain function type: {gf_type!r}; choose one of {GAIN_TYPES}")
     if acceptance not in ACCEPTANCE_RULES:
@@ -171,8 +171,9 @@ def _check_options(gf_type, acceptance, alpha, n_samples) -> None:
                 f"acceptance={acceptance!r} is a statistical test and requires "
                 "gain_function_type='loglik'; weight gains use acceptance='threshold'"
             )
-        if n_samples is None or int(n_samples) < 3:
-            raise ValueError(f"acceptance={acceptance!r} requires n_samples (number of observations)")
+        if require_n and (n_samples is None or float(n_samples) < 3):
+            raise ValueError(f"acceptance={acceptance!r} requires n_samples (number of observations); "
+                             "pass n_samples to MFCF or build from data with fit(X)")
         if acceptance == "ftest" and not (0 < alpha < 1):
             raise ValueError("alpha must be in (0, 1)")
 
@@ -198,6 +199,22 @@ def _check_nonnegative(W: np.ndarray) -> None:
             "transform the weights (e.g. np.abs(W)) or use 'sumsquares', which "
             "sums the squared weights"
         )
+
+
+def _effective_sample_size(Xc: np.ndarray) -> float:
+    """Effective number of observations for sample correlations of
+    autocorrelated series (Bartlett): ``n / mean_{i<j} (1 + phi_i phi_j) /
+    (1 - phi_i phi_j)``, with ``phi`` the lag-1 autocorrelations, clipped to
+    [-0.99, 0.99]; never larger than n."""
+    n, p = Xc.shape
+    num = np.sum(Xc[1:] * Xc[:-1], axis=0)
+    den = np.sum(Xc * Xc, axis=0)
+    phi = np.clip(num / den, -0.99, 0.99)
+    pp = np.outer(phi, phi)
+    infl = (1 + pp) / (1 - pp)
+    iu = np.triu_indices(p, 1)
+    factor = max(1.0, float(np.mean(infl[iu]))) if p > 1 else 1.0
+    return max(3.0, n / factor)
 
 
 # =============================================================================
@@ -713,7 +730,7 @@ class MFCF:
         alpha: float = 0.05,
         n_samples: Optional[int] = None,
     ) -> None:
-        _check_options(gain_function_type, acceptance, alpha, n_samples)
+        _check_options(gain_function_type, acceptance, alpha, n_samples, require_n=False)
         self._threshold = threshold
         self._min_clique_size = min_clique_size
         self._max_clique_size = max_clique_size
@@ -781,6 +798,100 @@ class MFCF:
                            "pass cov_matrix to obtain a precision estimate")
             J_logo = None
         return self._cliques, self._separators_count, self._peo, J_logo
+
+    def fit(
+        self,
+        X: np.ndarray,
+        *,
+        assume_centered: bool = False,
+        shrinkage: float = 0.0,
+        n_effective=None,
+    ) -> "MFCF":
+        """
+        Build the clique forest and a precision estimate directly from data.
+
+        Parameters
+        ----------
+        X : np.ndarray, shape (n_samples, n_features)
+            Observations in rows (e.g. a multivariate time series of returns).
+        assume_centered : bool, default=False
+            If False, the sample mean is removed.
+        shrinkage : float in [0, 1), default=0.0
+            Identity shrinkage of the correlation blocks used for the precision
+            estimate, ``(1 - shrinkage) R + shrinkage I``; recommended when
+            the number of observations is not much larger than the clique size.
+        n_effective : None, float or "auto", default=None
+            Number of observations used by the statistical acceptance rules.
+            None uses ``n_samples``. For autocorrelated series, "auto" estimates
+            it from the lag-1 autocorrelations ``phi`` of the series with
+            Bartlett's inflation factor for sample correlations,
+            ``n / mean_{i<j} (1 + phi_i phi_j) / (1 - phi_i phi_j)``.
+
+        Returns
+        -------
+        self
+            With attributes ``cliques_``, ``separators_`` (Counter), ``peo_``,
+            ``precision_`` and ``covariance_`` (covariance scale of `X`),
+            ``correlation_``, ``location_``, ``n_samples_``, ``n_effective_``.
+
+        Notes
+        -----
+        The structure is built from the sample correlation, so it does not
+        depend on the scales of the variables. The precision is the LoGo
+        assembly of the (shrunk) correlation blocks, rescaled by the sample
+        standard deviations: ``precision_ = D^{-1} J_R D^{-1}``. With
+        ``shrinkage=0`` and clique blocks of full rank it is the maximum
+        likelihood estimate for the decomposable model.
+        """
+        if self._gf_type != "loglik":
+            raise ValueError("fit(X) builds a likelihood model and requires gain_function_type='loglik'; "
+                             "for a weight matrix use run(C)")
+        X = np.asarray(X, dtype=float)
+        if X.ndim != 2 or X.shape[0] < 3:
+            raise ValueError("X must be an (n_samples, n_features) array with n_samples >= 3")
+        if not 0 <= shrinkage < 1:
+            raise ValueError("shrinkage must be in [0, 1)")
+        n, p = X.shape
+        loc = np.zeros(p) if assume_centered else X.mean(axis=0)
+        Xc = X - loc
+        cov = Xc.T @ Xc / n
+        sd = np.sqrt(np.diag(cov))
+        if np.any(sd <= 0):
+            raise ValueError("X has constant columns")
+        R = cov / np.outer(sd, sd)
+        R = (R + R.T) / 2
+        np.fill_diagonal(R, 1.0)
+
+        if n_effective is None:
+            n_eff = float(n)
+        elif isinstance(n_effective, str) and n_effective == "auto":
+            n_eff = _effective_sample_size(Xc)
+        else:
+            n_eff = float(n_effective)
+            if not 3 <= n_eff <= n:
+                raise ValueError("n_effective must lie between 3 and n_samples")
+
+        saved = self._n_samples
+        if self._acceptance != "threshold":
+            self._n_samples = n_eff
+        try:
+            R_shrunk = (1 - shrinkage) * R + shrinkage * np.eye(p)
+            cliques, seps, peo, J = self.run(C=R, cov_matrix=R_shrunk)
+        finally:
+            self._n_samples = saved
+
+        self.cliques_, self.separators_, self.peo_ = cliques, seps, peo
+        self.correlation_ = R
+        self.location_ = loc
+        self.n_samples_ = n
+        self.n_effective_ = n_eff
+        if J is None:
+            self.precision_ = self.covariance_ = None
+        else:
+            self.precision_ = J / np.outer(sd, sd)
+            Sigma = LA.inv(J) * np.outer(sd, sd)
+            self.covariance_ = (Sigma + Sigma.T) / 2
+        return self
 
     # -------------------------------------------------------------------------
     # Initialisation

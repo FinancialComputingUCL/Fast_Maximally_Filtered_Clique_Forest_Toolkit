@@ -47,6 +47,13 @@ class MFCFLoGo(EmpiricalCovariance):
     alpha : float, default=0.05
         Level of the partial F-test (acceptance='ftest').
 
+    shrinkage : float, default=0.0
+        Identity shrinkage of the correlation blocks of the LoGo assembly.
+
+    n_effective : None, float or 'auto', default=None
+        Number of observations for the statistical acceptance rules; 'auto'
+        corrects for autocorrelation of time series (see `MFCF.fit`).
+
     assume_centered : bool, default=False
         If True, data are not centered before computation.
         Useful when working with data whose mean is almost, but not exactly
@@ -84,6 +91,8 @@ class MFCFLoGo(EmpiricalCovariance):
         gain_function_type: str = "loglik",
         acceptance: str = "threshold",
         alpha: float = 0.05,
+        shrinkage: float = 0.0,
+        n_effective=None,
         assume_centered: bool = False,
     ):
         super().__init__(assume_centered=assume_centered)
@@ -94,6 +103,8 @@ class MFCFLoGo(EmpiricalCovariance):
         self.gain_function_type = gain_function_type
         self.acceptance = acceptance
         self.alpha = alpha
+        self.shrinkage = shrinkage
+        self.n_effective = n_effective
 
     def fit(self, X: np.ndarray, y=None) -> "MFCFLoGo":
         """Fit the estimator from data X.
@@ -125,9 +136,6 @@ class MFCFLoGo(EmpiricalCovariance):
             else X.mean(axis=0)
         )
 
-        C = np.corrcoef(X, rowvar=False)
-
-        # run MFCF algorithm over a similarity/affinity matrix.
         builder = _MFCFBuilder(
             threshold=self.threshold,
             min_clique_size=self.min_clique_size,
@@ -136,19 +144,18 @@ class MFCFLoGo(EmpiricalCovariance):
             gain_function_type=self.gain_function_type,
             acceptance=self.acceptance,
             alpha=self.alpha,
-            n_samples=X.shape[0],
         )
+        # structure from the sample correlation; precision on the covariance
+        # scale of X (LoGo of the correlation blocks rescaled by the variances)
+        builder.fit(X, assume_centered=self.assume_centered,
+                    shrinkage=self.shrinkage, n_effective=self.n_effective)
 
-        cliques, separators_count, peo, logo = builder.run(C=C)
+        self.cliques_ = builder.cliques_
+        self.separators_count_ = builder.separators_
+        self.peo_ = builder.peo_
+        self.n_effective_ = builder.n_effective_
 
-        # store internals
-        self.cliques_ = cliques
-        self.separators_count_ = separators_count
-        self.peo_ = peo
-
-        # precision is LoGo; covariance is inverse of LoGo
-        # Add small ridge if needed to avoid singularities.
-        self.precision_ = logo
+        self.precision_ = builder.precision_
         if self.store_precision and not np.all(np.isfinite(self.precision_)):
             raise ValueError("Computed precision_ contains non-finite values.")
 
@@ -312,6 +319,8 @@ class MFCFLoGoCV(EmpiricalCovariance):
         gain_function_type: str = "loglik",
         acceptance: str = "threshold",
         alpha: float = 0.05,
+        shrinkage: float = 0.0,
+        n_effective=None,
         assume_centered: bool = False,
         # scoring / robustness
         error_score: Union[str, float] = np.nan,
@@ -328,6 +337,8 @@ class MFCFLoGoCV(EmpiricalCovariance):
         self.gain_function_type = gain_function_type
         self.acceptance = acceptance
         self.alpha = alpha
+        self.shrinkage = shrinkage
+        self.n_effective = n_effective
         self.assume_centered = assume_centered
 
         self.error_score = error_score
@@ -407,6 +418,8 @@ class MFCFLoGoCV(EmpiricalCovariance):
                         gain_function_type=self.gain_function_type,
                         acceptance=self.acceptance,
                         alpha=self.alpha,
+                        shrinkage=self.shrinkage,
+                        n_effective=self.n_effective,
                         assume_centered=self.assume_centered,
                     )
                     base.fit(X_tr)
@@ -469,6 +482,8 @@ class MFCFLoGoCV(EmpiricalCovariance):
             gain_function_type=self.gain_function_type,
             acceptance=self.acceptance,
             alpha=self.alpha,
+            shrinkage=self.shrinkage,
+            n_effective=self.n_effective,
             assume_centered=self.assume_centered,
         )
         final.fit(X)
@@ -637,6 +652,8 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         gain_function_type: str = "loglik",
         acceptance: str = "threshold",
         alpha: float = 0.05,
+        shrinkage: float = 0.0,
+        n_effective=None,
         assume_centered: bool = False,
         # scoring / robustness
         error_score: Union[str, float] = np.nan,
@@ -656,6 +673,8 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         self.gain_function_type = gain_function_type
         self.acceptance = acceptance
         self.alpha = alpha
+        self.shrinkage = shrinkage
+        self.n_effective = n_effective
         self.assume_centered = assume_centered
 
         self.error_score = error_score
@@ -669,6 +688,8 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             gain_function_type=self.gain_function_type,
             acceptance=self.acceptance,
             alpha=self.alpha,
+            shrinkage=self.shrinkage,
+            n_effective=self.n_effective,
         )
         if not self.tunable_params:
             return params
@@ -737,6 +758,8 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             gain_function_type=self.gain_function_type,
             acceptance=self.acceptance,
             alpha=self.alpha,
+            shrinkage=self.shrinkage,
+            n_effective=self.n_effective,
         )
         final_params.update(best_params)
         # print(best_params, flush=True)

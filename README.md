@@ -100,9 +100,39 @@ cliques, seps, peo, _ = MFCF(gain_function_type="sum", threshold=0.2,
                              max_clique_size=4).run(C=W)
 ```
 
-The LoGo estimators (`MFCFLoGo`, `MFCFLoGoCV`, `MFCFLoGoCVAll`) accept the
-same options and take `n_samples` from the data; `MFCFLoGoCVAll` can tune
-`alpha` (`tunable_params=("alpha", ...)`).
+#### Building directly from data (`MFCF.fit`)
+
+For likelihood and covariance tasks the builder can take the data matrix
+(observations in rows, e.g. a multivariate time series of returns):
+
+```python
+m = MFCF(max_clique_size=10, acceptance="ftest", alpha=0.01).fit(
+    X, shrinkage=0.05, n_effective="auto")
+m.cliques_, m.separators_, m.peo_          # clique forest
+m.precision_, m.covariance_               # on the covariance scale of X
+m.n_effective_                            # observations used by the test
+```
+
+- The structure is built from the sample correlation, so it does not depend
+  on the scales of the variables; `precision_` is the LoGo assembly of the
+  (optionally shrunk) correlation blocks rescaled by the sample standard
+  deviations, i.e. the decomposable maximum-likelihood estimate when
+  `shrinkage=0`.
+- `n_samples` is set from `X`. For autocorrelated series the statistical
+  tests would otherwise be too permissive: `n_effective="auto"` uses
+  Bartlett's correction for sample correlations,
+  `n / mean_{i<j} (1 + phi_i phi_j) / (1 - phi_i phi_j)` with `phi` the lag-1
+  autocorrelations; a number can also be given.
+- Assumptions: approximately stationary series over the sample (use returns,
+  not prices). Data preparation (missing values, windows) is left to the user.
+- `fit(X)` requires the `"loglik"` gain; for weight matrices use `run(C)`.
+
+The LoGo estimators (`MFCFLoGo`, `MFCFLoGoCV`, `MFCFLoGoCVAll`) are built on
+`fit(X)` and accept the same options (`acceptance`, `alpha`, `shrinkage`,
+`n_effective`); `MFCFLoGoCVAll` can tune `alpha`
+(`tunable_params=("alpha", ...)`). Their `precision_` and `covariance_` are on
+the covariance scale of the data (earlier versions returned the precision of
+the correlation matrix).
 
 The exact gain measures the conditional information that an attachment adds,
 so it selects sparser and more accurate networks when the dependence structure
