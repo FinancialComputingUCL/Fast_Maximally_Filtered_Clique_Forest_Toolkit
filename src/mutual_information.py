@@ -569,17 +569,18 @@ def _histogram_mi_matrix_numba(
                 mx[a] = row
 
             marg_logsum = 0.0
+            m_x = 0
+            m_y = 0
             for a in range(n_bins):
                 marg_logsum += mx[a] * log_table[mx[a]]
                 marg_logsum += my[a] * log_table[my[a]]
+                m_x += mx[a] > 0
+                m_y += my[a] > 0
 
             mi = (joint_logsum - marg_logsum) * inv_n + log_n
-            # Miller–Madow bias correction.  Equal-frequency binning with
-            # n >= B fills every marginal bin, so m_x = m_y = n_bins exactly;
-            # only the joint occupancy m_xy varies.  The term is negative for
-            # inflated independence estimates (m_xy large), which is exactly the
-            # bias we need to remove in the p >> n regime.
-            mi += (2 * n_bins - m_xy - 1) * half_inv_n
+            # Miller–Madow bias correction with the occupied marginal bins
+            # (tied values share a bin, so marginal bins can be empty).
+            mi += (m_x + m_y - m_xy - 1) * half_inv_n
 
             if mi < 0.0:
                 mi = 0.0

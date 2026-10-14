@@ -595,7 +595,11 @@ class MFCFLoGoCV(EmpiricalCovariance):
         )
 
         # pick the best k (tie-breaker: larger k if equal mean? choose argmax, then prefer smaller std)
-        best_idx = int(np.argmax(means))
+        if not np.any(np.isfinite(means)):
+            raise ValueError("Every max_clique_size in the grid failed in cross-validation "
+                             "(e.g. fewer training observations than the clique size); "
+                             "use shrinkage > 0 or smaller clique sizes")
+        best_idx = int(np.nanargmax(np.where(np.isfinite(means), means, np.nan)))
         best_k = int(grid[best_idx])
 
         # Store CV artifacts

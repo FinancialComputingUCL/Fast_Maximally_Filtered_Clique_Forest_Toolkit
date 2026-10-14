@@ -972,3 +972,37 @@ def test_input_checks():
     for bad in (W[:, :-1], np.where(np.eye(10) > 0, 1.0, np.nan), W + np.triu(np.ones((10, 10)), 1) * 0.1):
         with pytest.raises(ValueError):
             MFCF(gain_function_type="sum").run(bad)
+
+
+# ----------------------- regressions from the second review pass (Oct 2026)
+def test_histogram_backends_agree_on_tied_and_constant_columns():
+    import mutual_information as mi
+    if not mi._HAS_NUMBA:
+        pytest.skip("numba not installed")
+    rng = np.random.default_rng(19)
+    X = np.column_stack([np.ones(1000), rng.integers(0, 3, 1000), rng.standard_normal(1000),
+                         np.where(rng.random(1000) < 0.3, 0.0, rng.standard_normal(1000))])
+    B = mi._resolve_n_bins("auto", 1000)
+    a = mi._histogram_raw_matrix(X, n_bins=B, n_jobs=None, use_numba=True)
+    b = mi._histogram_raw_matrix(X, n_bins=B, n_jobs=None, use_numba=False)
+    np.testing.assert_allclose(a, b, atol=1e-12)
+
+
+def test_precision_for_covariances_with_very_different_scales():
+    rng = np.random.default_rng(20)
+    X = rng.standard_normal((500, 5)) @ rng.standard_normal((5, 5))
+    for s in (1e3, 1e6, 1e8):
+        Cov = np.cov(X * np.array([1 / s, 1, 1, 1, s]), rowvar=False)
+        J = MFCF(gain_function_type="loglik", max_clique_size=3, n_starts=1).run(Cov)[3]
+        assert J is not None and np.all(np.isfinite(J))
+
+
+def test_cv_never_selects_a_failed_grid_value():
+    from mfcf_logo import MFCFLoGoCV
+    import warnings
+    X = np.random.default_rng(21).standard_normal((12, 10))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cv = MFCFLoGoCV(gain_function_type="loglik", max_clique_size_grid=[2, 3, 4, 6, 8, 9], cv=3).fit(X)
+    means = cv.cv_results_["mean_test_score"]
+    assert np.isfinite(means[list(cv.cv_results_["params"]).index({"max_clique_size": cv.best_max_clique_size_})])

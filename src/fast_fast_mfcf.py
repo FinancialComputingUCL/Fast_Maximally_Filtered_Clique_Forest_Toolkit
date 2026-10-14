@@ -1321,15 +1321,22 @@ class MFCF:
         return self._cliques, self._separators_count, self._peo, J_logo
 
     def _blocks_invertible(self, M: np.ndarray, rcond: float = 1e-12) -> bool:
-        """True if every clique block of M is invertible to working precision
-        (separator blocks are principal sub-blocks of clique blocks)."""
+        """True if every clique block of M is invertible to working precision,
+        judged on the correlation-scaled block so that the units of the
+        variables do not matter (separator blocks are principal sub-blocks of
+        clique blocks)."""
         for q in self._cliques:
             idx = sorted(q)
             if len(idx) < 2:
                 if not M[idx[0], idx[0]] > 0:
                     return False
                 continue
-            ev = np.abs(np.linalg.eigvalsh(M[np.ix_(idx, idx)]))
+            B = M[np.ix_(idx, idx)]
+            d = np.abs(np.diag(B))
+            if not np.all(d > 0):
+                return False
+            B = B / np.sqrt(np.outer(d, d))         # scale-free: correlation-scaled block
+            ev = np.abs(np.linalg.eigvalsh(B))
             if not np.all(np.isfinite(ev)) or ev.min() <= rcond * ev.max():
                 return False
         return True

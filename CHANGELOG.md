@@ -92,10 +92,13 @@ weights.
   freedom for the mean with `assume_centered=True`; `run()` accepts any
   array-like; `"sum"` rejects non-finite or asymmetric weights; DBHT rejects
   a signed similarity.
+- `MFCFLoGoCV` never selects a clique size whose folds failed; it raises if
+  all failed.
 - Mutual information: the KSG estimate is computed on standardised columns
   (it depended on the units of the variables, and the numba backend now
   agrees with the sklearn backend); tied values share a histogram bin
-  (independent discrete variables looked dependent); NaN inputs are
+  (independent discrete variables looked dependent) and the Miller-Madow
+  correction counts the occupied bins; NaN inputs are
   rejected; the default jitter is reproducible.
 - Crash when `min_clique_size` exceeds the number of variables.
 - `MFCFLoGoCVAll` ignored `cv` and the gain setting.
