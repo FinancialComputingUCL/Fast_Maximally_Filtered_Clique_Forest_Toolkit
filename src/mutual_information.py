@@ -538,7 +538,7 @@ def _histogram_mi_matrix_numba(
                 my[a] = 0
             # Single O(n) streaming pass over the two columns.
             for s in range(n):
-                hist[ci[s] * n_bins + cj[s]] += 1
+                hist[np.int64(ci[s]) * n_bins + np.int64(cj[s])] += 1   # widen int8 codes
 
             # One O(B^2) pass: marginals + joint log-sum + non-empty cells.
             # Using the algebraic split
