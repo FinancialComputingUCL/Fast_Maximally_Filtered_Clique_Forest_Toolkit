@@ -121,6 +121,10 @@ def mfcf_dbhts(
       a flat clustering at a chosen number of clusters or distance threshold.
     """
 
+    S = np.asarray(S, dtype=float)
+    if np.any(S[~np.eye(S.shape[0], dtype=bool)] < 0):
+        raise ValueError("DBHT needs a non-negative similarity S (e.g. (1 + R) / 2 for a "
+                         "correlation matrix R)")
     builder = _MFCFBuilder(
         threshold=threshold,
         min_clique_size=min_clique_size,

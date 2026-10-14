@@ -4,7 +4,7 @@ Accelerated Maximally Filtered Clique Forest (MFCF) implementations for sparse p
 
 ## Introduction
 - Build MFCF backbones from dense similarity matrices in a few seconds.
-- Drop-in graphical-model estimators (`MFCFLoGO`, `MFCFLoGOCV`, `MFCFLoGOCVAll`) that follow the scikit-learn API and offer a faster, more accurate alternative to Graphical Lasso when the sample-to-feature ratio is small.
+- Drop-in graphical-model estimators (`MFCFLoGo`, `MFCFLoGoCV`, `MFCFLoGoCVAll`) that follow the scikit-learn API and offer a faster, more accurate alternative to Graphical Lasso when the sample-to-feature ratio is small.
 - Extend Riskfolio-Lib’s Direct Bubble Hierarchical Tree (DBHT) pipeline so it can operate over any MFCF backbone instead of only TMFG graphs (`mfcf_dbht`).
 - Gaussian log-likelihood gain with statistical validation (F-test, BIC), several starts, and decomposable maximum-likelihood precision built directly from data (`MFCF.fit`).
 - Dependence beyond correlation: rank (Spearman, Kendall) and mutual-information (KSG, histogram) similarities (`mutual_information`).
@@ -215,19 +215,21 @@ keeps working.
 | Earlier code | What to use now |
 |---|---|
 | original `fast_fast_mfcf`: `MFCF().fast_mfcf(C, mfcf_control(), "sumsquares")` | still accepted (DeprecationWarning); the control dictionary maps onto the options below, including `drop_sep` and `method="TMFG"` |
-| toolkit `main`: `MFCF(threshold=..., max_clique_size=...).run(C)` | same call; add `gain_function_type="sumsquares", new_component="first"` for identical results |
+| toolkit `main`: `MFCF(threshold=..., max_clique_size=...).run(C)` | same call; add `gain_function_type="sumsquares", new_component="first"` for the same results (see below for the exceptions) |
 | `mutual_info` branch: `MFCFLoGo(similarity="mutual_information", mi_estimator=...)`, `fit(X, mi_matrix=..., cov_matrix=...)` | same call (pass `gain_function_type="sumsquares"`, the default of that branch) |
 
 Options of the original implementation: `drop_sep=True` uses each separator
 for at most one attachment, and `seed="tmfg"` starts from the four vertices
 with the largest sums of above-mean squared weights, as in the TMFG.
 Through the legacy call, results equal those of the original implementation
-(with its later bug fixes) in 98% of 1836 tested configurations; the others
-combine `coordination_number=1` with a positive threshold, where the two
-implementations treat a separator at its cap differently and both return
-valid clique forests.
+(with its later bug fixes) in 1696 of 1836 tested configurations (92%). All
+the others combine a positive threshold with a coordination cap or
+`drop_sep`: there the original implementation loses facets that can still
+host vertices, which this version fixes. Likewise, the toolkit `main` branch
+is reproduced except with a cap and a threshold, and for exactly tied
+weights.
 
-### Precision Estimation (`MFCFLoGO()`)
+### Precision Estimation (`MFCFLoGo()`)
 ```python
 import numpy as np
 from mfcf_logo import MFCFLoGo  # the "mfcflogo" estimator
@@ -246,7 +248,7 @@ covariance = est.get_covariance()
 - Fully scikit-learn compatible: works with `Pipeline`, `GridSearchCV`, and scoring utilities.
 - In many low-sample/high-dimensional regimes it runs faster and attains higher accuracy than Graphical Lasso while keeping interpretation straightforward through clique structure.
 
-### Cross-validated Precision (`mfcflogocv()`)
+### Cross-validated Precision (`MFCFLoGoCV()`)
 ```python
 from mfcf_logo import MFCFLoGoCV
 
@@ -264,7 +266,7 @@ best_precision = cv_est.get_precision()
 - Automatically selects `max_clique_size` via K-fold log-likelihood scoring.
 - Keeps full diagnostics in `cv_results_` and per-fold records in `fold_scores_`.
 
-### Automated Hyperparameter Search (`mfcflogocvall()`)
+### Automated Hyperparameter Search (`MFCFLoGoCVAll()`)
 ```python
 from mfcf_logo import MFCFLoGoCVAll
 
@@ -284,9 +286,10 @@ best_params = tuned.estimator_
 
 ### Hierarchical Clustering with DBHT (`mfcf_dbht()`)
 
-The backbone is built on a non-negative similarity `S` with the `"sum"` gain
-(default); for a signed correlation matrix pass `gain_function_type="loglik"`
-or `"sumsquares"`.
+The backbone is built on a non-negative similarity `S` (checked) with the
+`"sum"` gain (default); for a correlation matrix `R` use, for instance,
+`S = (1 + R) / 2`, which is also a valid input for `"loglik"` and
+`"sumsquares"`.
 
 ```python
 import numpy as np

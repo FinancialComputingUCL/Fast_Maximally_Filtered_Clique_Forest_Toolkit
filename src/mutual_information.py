@@ -139,8 +139,12 @@ def _linfoot_inplace_numba(M: np.ndarray) -> None:
 def _linfoot_inplace(M: np.ndarray) -> None:
     """Linfoot transform, numba-fused when available else numpy in-place."""
     if _HAS_NUMBA:
-        _linfoot_inplace_numba(M)
-    else:
+        try:
+            _linfoot_inplace_numba(M)
+            return
+        except Exception:          # unusable Numba cache etc.: numpy path below
+            pass
+    if True:
         np.exp(-2.0 * M, out=M)
         np.subtract(1.0, M, out=M)
         np.maximum(M, 0.0, out=M)
@@ -431,22 +435,17 @@ def _equal_frequency_codes(X: np.ndarray, n_bins: int) -> np.ndarray:
     a pure rank transform — so the estimate is invariant to any monotone
     reparametrisation of the marginals, exactly the property that motivates MI
     over correlation — and it is robust to fat tails / outliers that would leave
-    equal-*width* bins almost all empty.  Ties are broken by the stable argsort
-    order, which is harmless for continuous data.
+    equal-*width* bins almost all empty.  Tied values share a bin (their
+    common lowest rank decides it): splitting ties by sort order would put
+    tied observations of different columns into bins in the same row order
+    and create spurious dependence for discrete or tied data.
     """
+    from scipy.stats import rankdata
     XT = np.ascontiguousarray(X.T)  # (p, n); rows are columns of X
     p, n = XT.shape
-    # quicksort (not stable): equal-frequency binning is indifferent to the
-    # order in which exact ties are split, so the cheaper sort is fine.
-    order = np.argsort(XT, axis=1, kind="quicksort")  # ascending value -> index
-    # The r-th smallest sample of every column goes to bin ``r * B // n``.
-    # Scatter that fixed block-code vector straight through the sort
-    # permutation — avoids materialising the full integer rank array and the
-    # subsequent ``(rank * B) // n`` multiply over all (p, n) entries.
-    block = ((np.arange(n) * n_bins) // n).astype(np.int8 if n_bins <= 127 else np.int16)
-    codes = np.empty((p, n), dtype=block.dtype)
-    np.put_along_axis(codes, order, np.broadcast_to(block, order.shape), axis=1)
-    return codes
+    ranks = rankdata(XT, axis=1, method="min").astype(np.int64) - 1   # ties share a rank
+    codes = ((ranks * n_bins) // n).astype(np.int8 if n_bins <= 127 else np.int16)
+    return np.ascontiguousarray(codes)
 
 
 # NB: no ``cache=True`` — ``numba.get_num_threads()`` pulls in dynamic globals
@@ -659,21 +658,24 @@ def _histogram_raw_matrix(
     M = np.zeros((n_features, n_features), dtype=np.float64)
 
     if use_numba:
-        if n_jobs is not None and n_jobs > 0:
-            _orig = numba.get_num_threads()
-            numba.set_num_threads(int(n_jobs))
-            try:
+        try:
+            if n_jobs is not None and n_jobs > 0:
+                _orig = numba.get_num_threads()
+                numba.set_num_threads(int(n_jobs))
+                try:
+                    _histogram_mi_matrix_numba(
+                        codes, int(n_bins), int(n_features), log_table, log_n, M
+                    )
+                finally:
+                    numba.set_num_threads(_orig)
+            else:
                 _histogram_mi_matrix_numba(
                     codes, int(n_bins), int(n_features), log_table, log_n, M
                 )
-            finally:
-                numba.set_num_threads(_orig)
-        else:
-            _histogram_mi_matrix_numba(
-                codes, int(n_bins), int(n_features), log_table, log_n, M
-            )
-        np.maximum(M, 0.0, out=M)
-    else:
+            np.maximum(M, 0.0, out=M)
+        except Exception:          # unusable Numba cache etc.: numpy path
+            use_numba = False
+    if not use_numba:
         M = _histogram_mi_matrix_numpy(codes, int(n_bins), log_table, log_n)
     return M
 
@@ -707,58 +709,69 @@ def _ksg_raw_matrix(
         )
     use_numba = backend == "numba" or (backend == "auto" and _HAS_NUMBA)
 
+    # Standardise the columns: the max-norm KSG estimate is not invariant to
+    # rescaling a variable, and sklearn's reference path standardises too, so
+    # both backends now give the same, unit-free estimate.
+    sd = X.std(axis=0)
+    if np.any(sd == 0):
+        raise ValueError("X has constant columns; mutual information is undefined.")
+    X = (X - X.mean(axis=0)) / sd
     # Kraskov-style tie-breaking jitter: scaled by the per-column mean
     # absolute magnitude so it never dominates the data signal.
     rng = np.random.RandomState(random_state)
     col_scale = np.maximum(1.0, np.mean(np.abs(X), axis=0))
     X_work = X + 1e-10 * col_scale * rng.standard_normal(X.shape)
 
+    M = None
     if use_numba:
-        # Row-major transpose so each column (now a row) is contiguous.
-        XT = np.ascontiguousarray(X_work.T)
-        # Per-column sort: argsort gives the rank-to-index map; the inverse
-        # permutation is the rank of every original index.  This is the
-        # entire precomputation needed by the two-pointer kernel.
-        argsort_cols = np.argsort(XT, axis=1, kind="quicksort").astype(np.int64)
-        sorted_cols = np.take_along_axis(XT, argsort_cols, axis=1)
-        ranks_cols = np.empty_like(argsort_cols)
-        _idx = np.arange(n_samples, dtype=np.int64)
-        for _p in range(n_features):
-            ranks_cols[_p, argsort_cols[_p]] = _idx
-        psi = _digamma_int_table(n_samples)
-        M = np.zeros((n_features, n_features), dtype=np.float64)
+        try:
+            # Row-major transpose so each column (now a row) is contiguous.
+            XT = np.ascontiguousarray(X_work.T)
+            # Per-column sort: argsort gives the rank-to-index map; the inverse
+            # permutation is the rank of every original index.  This is the
+            # entire precomputation needed by the two-pointer kernel.
+            argsort_cols = np.argsort(XT, axis=1, kind="quicksort").astype(np.int64)
+            sorted_cols = np.take_along_axis(XT, argsort_cols, axis=1)
+            ranks_cols = np.empty_like(argsort_cols)
+            _idx = np.arange(n_samples, dtype=np.int64)
+            for _p in range(n_features):
+                ranks_cols[_p, argsort_cols[_p]] = _idx
+            psi = _digamma_int_table(n_samples)
+            M = np.zeros((n_features, n_features), dtype=np.float64)
 
-        # Flat enumeration of upper-triangle pairs.  Driving the kernel with
-        # ``prange`` over this flat index gives the thread pool perfectly
-        # balanced chunks; the natural nested-loop ordering put O(p) work on
-        # the last thread and O(1) on the first, leaving most threads idle for
-        # the tail of the run.
-        pair_i_arr, pair_j_arr = np.triu_indices(n_features, k=1)
-        pair_i_arr = pair_i_arr.astype(np.int64, copy=False)
-        pair_j_arr = pair_j_arr.astype(np.int64, copy=False)
+            # Flat enumeration of upper-triangle pairs.  Driving the kernel with
+            # ``prange`` over this flat index gives the thread pool perfectly
+            # balanced chunks; the natural nested-loop ordering put O(p) work on
+            # the last thread and O(1) on the first, leaving most threads idle for
+            # the tail of the run.
+            pair_i_arr, pair_j_arr = np.triu_indices(n_features, k=1)
+            pair_i_arr = pair_i_arr.astype(np.int64, copy=False)
+            pair_j_arr = pair_j_arr.astype(np.int64, copy=False)
 
-        if n_jobs is not None and n_jobs > 0:
-            _orig = numba.get_num_threads()
-            numba.set_num_threads(int(n_jobs))
-            try:
+            if n_jobs is not None and n_jobs > 0:
+                _orig = numba.get_num_threads()
+                numba.set_num_threads(int(n_jobs))
+                try:
+                    _ksg_matrix_numba(
+                        XT, sorted_cols, argsort_cols, ranks_cols,
+                        pair_i_arr, pair_j_arr,
+                        int(n_neighbors), psi, M,
+                    )
+                finally:
+                    numba.set_num_threads(_orig)
+            else:
                 _ksg_matrix_numba(
                     XT, sorted_cols, argsort_cols, ranks_cols,
                     pair_i_arr, pair_j_arr,
                     int(n_neighbors), psi, M,
                 )
-            finally:
-                numba.set_num_threads(_orig)
-        else:
-            _ksg_matrix_numba(
-                XT, sorted_cols, argsort_cols, ranks_cols,
-                pair_i_arr, pair_j_arr,
-                int(n_neighbors), psi, M,
-            )
 
-        # Clip to guard against tiny negative values from the digamma table
-        # plus floating-point noise (the kernel already clips per pair).
-        np.maximum(M, 0.0, out=M)
-    else:
+            # Clip to guard against tiny negative values from the digamma table
+            # plus floating-point noise (the kernel already clips per pair).
+            np.maximum(M, 0.0, out=M)
+        except Exception:          # unusable Numba cache etc.: sklearn reference path
+            M = None
+    if M is None:
         M = _ksg_matrix_sklearn(
             X_work,
             n_neighbors=int(n_neighbors),
@@ -811,7 +824,7 @@ def mutual_information_matrix(
         keeps the backend default.
     random_state : int or None, default=None
         Seed for the KSG tie-breaking jitter (standard Kraskov-2004
-        preprocessing).  Unused by the histogram estimator, which is a
+        preprocessing); None uses a fixed seed, so results are reproducible.  Unused by the histogram estimator, which is a
         deterministic rank transform.
     backend : {"auto", "numba", "sklearn"}, default="auto"
         Backend selector.  ``"auto"`` picks numba when it is importable, else
@@ -849,6 +862,10 @@ def mutual_information_matrix(
     X = np.asarray(X, dtype=np.float64)
     if X.ndim != 2:
         raise ValueError(f"X must be 2-D, got shape {X.shape}.")
+    if not np.all(np.isfinite(X)):
+        raise ValueError("X contains NaN or infinite values.")
+    if random_state is None:
+        random_state = 0      # reproducible tie-breaking jitter by default
 
     n_samples, n_features = X.shape
     if n_samples < 2:

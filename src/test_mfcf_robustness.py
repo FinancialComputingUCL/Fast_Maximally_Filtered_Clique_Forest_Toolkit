@@ -148,8 +148,7 @@ def test_dbht(gain):
     S = np.corrcoef(X, rowvar=False)
     D = np.sqrt(np.clip(2 * (1 - S), 0, None))
     np.fill_diagonal(D, 0.0)
-    if gain in ("sum", None):                                  # non-negative similarity
-        S = (1 + S) / 2
+    S = (1 + S) / 2                                            # non-negative similarity
     kw = {} if gain is None else dict(gain_function_type=gain)    # default: "sum"
     T8, Rpm, Adjv, Dpm, Mv, Z = mfcf_dbhts(D, S, max_clique_size=4, **kw)
     labels = fcluster(Z, 4, "maxclust")
@@ -243,10 +242,11 @@ def test_dbht_rejects_disconnected_graph():
     pytest.importorskip("riskfolio")
     from mfcf_dbht import mfcf_dbhts
     rng = np.random.default_rng(0)
-    S = np.corrcoef(rng.standard_normal((300, 12)), rowvar=False)   # independent noise
-    D = np.sqrt(np.clip(2 * (1 - S), 0, None)); np.fill_diagonal(D, 0.0)
+    R = np.corrcoef(rng.standard_normal((300, 12)), rowvar=False)   # independent noise
+    D = np.sqrt(np.clip(2 * (1 - R), 0, None)); np.fill_diagonal(D, 0.0)
+    S = R ** 2                                                       # weak similarities
     with pytest.raises(ValueError, match="connected"):
-        mfcf_dbhts(D, S, threshold=0.5, max_clique_size=4, gain_function_type="sumsquares")
+        mfcf_dbhts(D, S, threshold=0.5, max_clique_size=4, gain_function_type="sum")
 
 
 @pytest.mark.parametrize("kw", [dict(max_clique_size=6, acceptance="ftest", alpha=0.01),
@@ -288,3 +288,12 @@ def test_future_warning_for_unset_gain():
         warnings.simplefilter("error")
         MFCF(gain_function_type="loglik")
         MFCF(gain_function_type="sumsquares", new_component="first")
+
+
+def test_dbht_rejects_signed_similarity():
+    pytest.importorskip("riskfolio")
+    from mfcf_dbht import mfcf_dbhts
+    R = np.corrcoef(np.random.default_rng(0).standard_normal((100, 8)), rowvar=False)
+    D = np.sqrt(np.clip(2 * (1 - R), 0, None)); np.fill_diagonal(D, 0.0)
+    with pytest.raises(ValueError, match="non-negative"):
+        mfcf_dbhts(D, R, gain_function_type="sumsquares")

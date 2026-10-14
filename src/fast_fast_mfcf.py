@@ -10,9 +10,10 @@ The builder works on two kinds of input:
 * a covariance or correlation matrix, with the exact Gaussian log-likelihood
   gain ("loglik", default); each greedy step can be accepted by a threshold on
   the squared partial correlation, a partial F-test or the BIC;
-* a general weight (similarity) matrix, with the sum of squared weights
-  ("sumsquares") or the sum of weights ("sum"); each edge is accepted by a
-  threshold on its (squared) weight.
+* a covariance or correlation(-coefficient) matrix with the original sum of
+  squared correlations ("sumsquares"), or a non-negative weight (similarity)
+  matrix with the sum of weights ("sum"); each edge is accepted by a threshold
+  on its (squared) weight.
 
 High level flow:
 1) Seed an initial clique using above-mean edges.
@@ -464,7 +465,11 @@ def _check_correlation_like(C: np.ndarray) -> None:
 
 
 def _check_nonnegative(W: np.ndarray) -> None:
-    off = W[~np.eye(W.shape[0], dtype=bool)] if W.ndim == 2 and W.shape[0] == W.shape[1] else W
+    if W.ndim != 2 or W.shape[0] != W.shape[1]:
+        raise ValueError("gain_function_type='sum' requires a square weight matrix")
+    if not np.all(np.isfinite(W)) or not np.allclose(W, W.T, atol=1e-10):
+        raise ValueError("gain_function_type='sum' requires a finite, symmetric weight matrix")
+    off = W[~np.eye(W.shape[0], dtype=bool)]
     if np.any(off < 0):
         raise ValueError(
             "gain_function_type='sum' requires a non-negative weight matrix; "
@@ -509,7 +514,7 @@ def _kendall_tau_b(X: np.ndarray, block: int = 256, gram_max_n: int = 2000) -> n
         T = np.eye(p)
         for i in range(p):
             for j in range(i):
-                T[i, j] = T[j, i] = stats.kendalltau(X[:, i], X[:, j]).statistic
+                T[i, j] = T[j, i] = stats.kendalltau(X[:, i], X[:, j])[0]
         return T
     G = np.zeros((p, p))
     for k0 in range(0, n - 1, block):
@@ -579,7 +584,8 @@ class Gains:
       partial correlation is ``>= threshold`` (the first step uses the plain
       squared correlation, as in "sumsquares").
     - "sumsquares": ``sum_{j in S} C[v, j]^2`` over the entries
-      ``C[v, j]^2 >= threshold``; `C` may be any weight matrix.
+      ``C[v, j]^2 >= threshold``; `C` must be a covariance or a matrix of
+      correlation coefficients, ``|C_ij| <= sqrt(C_ii C_jj)`` (checked).
     - "sum": ``sum_{j in S} C[v, j]`` over the entries ``C[v, j] >= threshold``;
       `C` must be non-negative off the diagonal (checked). "sumsquares" is
       "sum" applied to the non-negative weights ``C ** 2``.
@@ -1156,8 +1162,24 @@ class MFCF:
             gain_function_type = "loglik"
         if seed not in ("strongest", "tmfg"):
             raise ValueError("seed must be 'strongest' or 'tmfg'")
+        def _is_int(x):
+            return not isinstance(x, bool) and isinstance(x, (int, np.integer, float, np.floating)) \
+                and np.isfinite(x) and float(x) == int(x)
+        if not (_is_int(max_clique_size) and max_clique_size >= 1):
+            raise ValueError("max_clique_size must be an integer >= 1")
+        if not (_is_int(min_clique_size) and 0 <= min_clique_size <= max_clique_size):
+            raise ValueError("min_clique_size must be an integer between 0 and max_clique_size")
+        if not (coordination_number == np.inf or (_is_int(coordination_number) and coordination_number >= 1)):
+            raise ValueError("coordination_number must be an integer >= 1 or np.inf")
+        if not (np.isfinite(threshold) and threshold >= 0):
+            raise ValueError("threshold must be finite and >= 0")
+        if gain_function_type == "loglik" and threshold > 1:
+            raise ValueError("with the 'loglik' gain, threshold is a squared partial correlation in [0, 1]")
+        max_clique_size, min_clique_size = int(max_clique_size), int(min_clique_size)
         if seed == "tmfg" and max_clique_size < 4:
             raise ValueError("seed='tmfg' needs max_clique_size >= 4")
+        if seed == "tmfg" and min_clique_size > 5:
+            raise ValueError("seed='tmfg' (four vertices) needs min_clique_size <= 5")
         self._seed = seed
         self._drop_sep = bool(drop_sep)
         _check_options(gain_function_type, acceptance, alpha, n_samples, require_n=False)
@@ -1205,7 +1227,8 @@ class MFCF:
                  new_component="first", n_starts=1)
         m._legacy_seed = True
         out = m.run(C, cov_matrix=cov_matrix)
-        self.__dict__.update(m.__dict__)
+        # expose the results, not the configuration, on the calling instance
+        self._C, self._cliques, self._separators_count, self._peo = m._C, m._cliques, m._separators_count, m._peo
         return out
 
     def run(
@@ -1245,13 +1268,32 @@ class MFCF:
         if self._gain_unset:
             warnings.warn(_DEFAULT_CHANGE_MSG, FutureWarning, stacklevel=2)
             self._gain_unset = False
+        C = np.asarray(C, dtype=float)
+        if C.ndim != 2 or C.shape[0] != C.shape[1] or C.shape[0] == 0:
+            raise ValueError("C must be a non-empty square matrix")
+        if cov_matrix is not None:
+            cov_matrix = np.asarray(cov_matrix, dtype=float)
+            if cov_matrix.shape != C.shape:
+                raise ValueError("cov_matrix must have the shape of C")
         self._C = C
+        self._Cs = None
         best = None
         seeds = self._start_seeds(min(self._n_starts, C.shape[0]))
         for k, seed in enumerate(seeds):
             self._seed_override = seed
             try:
-                self._build_fast() if self._fast_path_applies() else self._build()
+                if self._fast_path_applies():
+                    try:
+                        self._build_fast()
+                    except ValueError:
+                        raise
+                    except Exception as e:      # e.g. an unusable Numba cache
+                        warnings.warn(f"Numba direct path unavailable ({type(e).__name__}: {e}); "
+                                      "using the general path", RuntimeWarning, stacklevel=2)
+                        self._use_fast_path = False
+                        self._build()
+                else:
+                    self._build()
             finally:
                 self._seed_override = None
             if len(seeds) == 1:
@@ -1263,15 +1305,34 @@ class MFCF:
         if best is not None:
             _, self.start_, self._cliques, self._separators_count, self._peo = best
 
-        matrix_for_logo = cov_matrix if cov_matrix is not None else C
-        try:
-            J_logo = self._logo(matrix_for_logo, self._cliques, self._separators_count)
-        except LA.LinAlgError:
-            # e.g. a general weight matrix: LoGo needs covariance blocks
-            logger.warning("LoGo not computed: clique blocks of the matrix are singular; "
-                           "pass cov_matrix to obtain a precision estimate")
+        matrix_for_logo = np.asarray(cov_matrix if cov_matrix is not None else C, dtype=float)
+        if not self._blocks_invertible(matrix_for_logo):
+            if cov_matrix is not None or self._gf_type != "sum":
+                warnings.warn("No LoGo precision: some clique blocks are (numerically) singular, "
+                              "e.g. fewer observations than the clique size; use shrinkage > 0 "
+                              "(fit) or pass a positive definite cov_matrix (run)", RuntimeWarning,
+                              stacklevel=2)
             J_logo = None
+        else:
+            try:
+                J_logo = self._logo(matrix_for_logo, self._cliques, self._separators_count)
+            except LA.LinAlgError:
+                J_logo = None
         return self._cliques, self._separators_count, self._peo, J_logo
+
+    def _blocks_invertible(self, M: np.ndarray, rcond: float = 1e-12) -> bool:
+        """True if every clique block of M is invertible to working precision
+        (separator blocks are principal sub-blocks of clique blocks)."""
+        for q in self._cliques:
+            idx = sorted(q)
+            if len(idx) < 2:
+                if not M[idx[0], idx[0]] > 0:
+                    return False
+                continue
+            ev = np.abs(np.linalg.eigvalsh(M[np.ix_(idx, idx)]))
+            if not np.all(np.isfinite(ev)) or ev.min() <= rcond * ev.max():
+                return False
+        return True
 
     def _start_seeds(self, k: int) -> List[Optional[Clique]]:
         """Seeds of the k starts: the default seed, then vertices spread over
@@ -1659,8 +1720,13 @@ class MFCF:
             self._component_threshold = self._threshold
         elif self._acceptance == "threshold":
             self._component_threshold = -0.5 * np.log1p(-min(self._threshold, 1 - 1e-12))
-        else:  # statistical acceptance: new component only if nothing is accepted
-            self._component_threshold = 1e-15
+        else:
+            # statistical acceptance: as with the threshold rule, the total gain
+            # must reach that of one accepted step (the critical value of the
+            # first test), so mandatory picks alone do not attach a vertex
+            c0 = self._gains._critical_pc2(0)
+            self._component_threshold = (np.inf if not np.isfinite(c0)
+                                         else max(1e-15, -0.5 * np.log1p(-min(c0, 1 - 1e-12))))
 
         self._initialise()
         self._compute_mfcf()
@@ -1774,10 +1840,12 @@ class MFCF:
             if not 3 <= n_eff <= n:
                 raise ValueError("n_effective must lie between 3 and n_samples")
 
+        restore = None
         if similarity == "correlation":
             S = R
         elif similarity == "mutual_information":
             if self._gain_unset:      # as in the mutual_info branch: sum of squares
+                restore = (self._gf_type, self._gain_unset, self._n_starts)
                 self._gf_type, self._gain_unset = "sumsquares", False
                 if self._n_starts_auto:
                     self._n_starts = 1
@@ -1799,12 +1867,15 @@ class MFCF:
 
         saved = self._n_samples
         if self._acceptance != "threshold":
-            self._n_samples = n_eff
+            # the F-test spends one degree of freedom on the estimated mean
+            self._n_samples = n_eff + (1.0 if assume_centered and self._acceptance == "ftest" else 0.0)
         try:
             R_shrunk = (1 - shrinkage) * R + shrinkage * np.eye(p)
             cliques, seps, peo, J = self.run(C=S, cov_matrix=R_shrunk)
         finally:
             self._n_samples = saved
+            if restore is not None:   # the switch applies to this fit only
+                self._gf_type, self._gain_unset, self._n_starts = restore
         self.similarity_ = S
 
         self.cliques_, self.separators_, self.peo_ = cliques, seps, peo
@@ -1843,6 +1914,7 @@ class MFCF:
         self._separators_count: Counter = Counter()
         self._pq_separators: set[Separator] = set()
         self._seen_separators: set[Separator] = set()
+        self._facet_excluded: dict = {}                # facet -> vertices it can no longer host
 
         self._peo: List[Node] = [v for v in first_cl]  # Perfect elimination order
         self._outstanding_nodes_mask = np.ones(self._C.shape[0], dtype=bool)
@@ -1877,14 +1949,29 @@ class MFCF:
             W = np.square(np.asarray(self._C, dtype=float))
             v = np.sum(W * (W > W.mean()), axis=1)
             return frozenset(int(x) for x in np.argsort(-v, kind="stable")[:4])
-        C1 = self._C.copy()
-        r, c = np.nonzero(self._C <= self._C.mean())
-        C1[r, c] = 0
+        Cs = self._scale_free()
+        C1 = Cs.copy()
+        C1[Cs <= Cs.mean()] = 0
         sums = C1.sum(axis=0)
-        cand = np.argsort(-sums, kind="stable")
+        W = Cs * Cs if self._gf_type != "sum" else np.abs(Cs)
+        strength = W.sum(axis=0) - np.diag(W)
+        cand = np.lexsort((-strength, -sums))        # ties broken by total strength
         # seed with at least the strongest vertex, so the output does not
         # depend on the order of the variables
         return frozenset(int(x) for x in cand[: max(1, self._min_clique_size - 1)])
+
+    def _scale_free(self) -> np.ndarray:
+        """The input on the scale used by the seed and root rules: the
+        correlation matrix for "loglik" (whose gain is scale-invariant, so a
+        covariance and its correlation give the same forest), else as given."""
+        Cs = getattr(self, "_Cs", None)
+        if Cs is None or Cs.shape != np.shape(self._C):
+            Cs = np.asarray(self._C, dtype=float)
+            if self._gf_type == "loglik":
+                d = np.sqrt(np.diag(Cs))
+                Cs = Cs / np.outer(d, d)
+            self._Cs = Cs
+        return Cs
 
     # -------------------------------------------------------------------------
     # Main algorithm loop
@@ -1953,10 +2040,20 @@ class MFCF:
         """
         # If drop_sep is enabled, disable candidates with a seen/used separator.
         sep = sep_wrapper.separator
-        # multiplicity constraint
-        if self._separators_count[sep] >= self._coordination_number:
-            return True
-        if self._drop_sep and (sep in self._seen_separators or self._separators_count[sep] > 0):
+        # multiplicity constraint (and drop_sep) on the separator actually used
+        if (self._separators_count[sep] >= self._coordination_number
+                or (self._drop_sep and (sep in self._seen_separators or self._separators_count[sep] > 0))):
+            facet = sep_wrapper.separator_prior_threshold
+            if facet != sep:
+                # only this vertex's kept subset of the facet is blocked (or the
+                # candidate is stale): the kept subset depends on (v, facet)
+                # alone and caps only grow, so exclude v from the facet for
+                # good and requeue the facet for its other vertices
+                if self._outstanding_nodes_mask[v]:
+                    excl = self._facet_excluded.setdefault(
+                        facet, np.zeros(len(self._outstanding_nodes_mask), bool))
+                    excl[v] = True
+                self._update_pq_for_new_separator(facet)
             return True
         if np.isnan(gain):
             return True
@@ -1979,7 +2076,7 @@ class MFCF:
         out = np.flatnonzero(mask)
         if self._new_component == "first" or len(out) <= 1:
             return int(out[0])
-        W = self._C[np.ix_(out, out)]
+        W = self._scale_free()[np.ix_(out, out)]
         W = W * W if self._gf_type != "sum" else np.abs(W)
         strength = W.sum(axis=1) - np.diag(W)
         return int(out[np.argmax(strength)])        # ties: lowest index
@@ -2164,7 +2261,13 @@ class MFCF:
             return
         if sep and self._separators_count[sep] >= self._coordination_number:
             return  # a separator at the coordination cap cannot host new vertices
-        gain, v, ranked_sep = self._gf(self._outstanding_nodes_mask, sep)
+        mask = self._outstanding_nodes_mask
+        excl = self._facet_excluded.get(sep)
+        if excl is not None:
+            mask = mask & ~excl
+            if not mask.any():
+                return
+        gain, v, ranked_sep = self._gf(mask, sep)
         self._push_to_pq(gain, v, ranked_sep)
 
     def _pop_from_pq(self):

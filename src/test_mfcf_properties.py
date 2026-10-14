@@ -339,14 +339,42 @@ def test_bic_boundary(n):
         assert (len(sw.separator) == 1) == accept
 
 
-def test_mandatory_picks_bypass_the_test():
-    """With min_clique_size = k, attachments of at least k - 1 vertices are
-    forced even on pure noise, whatever the statistical rule says."""
+@pytest.mark.parametrize("min_size", [1, 2, 3])
+def test_noise_gives_no_structure_with_any_rule(min_size):
+    """Mandatory picks set the clique size of an attachment, but a vertex
+    attaches only if its total gain reaches that of one accepted step. On
+    pure noise a vertex therefore joins a structure only if one of its pairs
+    passes the rule by itself, for any min_clique_size (with a strict F-test
+    or a high threshold: singletons only, apart from the seed clique of
+    min_clique_size - 1 vertices)."""
     rng = np.random.default_rng(0)
     C = np.corrcoef(rng.standard_normal((300, 15)), rowvar=False)
+    for kw, crit in ((dict(acceptance="ftest", alpha=1e-8, n_samples=300), None),
+                     (dict(acceptance="bic", n_samples=300), -np.expm1(-np.log(300) / 300)),
+                     (dict(threshold=0.5), None)):
+        cl, seps, peo, _ = MFCF(gain_function_type="loglik", min_clique_size=min_size,
+                                max_clique_size=5, n_starts=1, **kw).run(C)
+        seed = set(int(v) for v in peo[:max(1, min_size - 1)])     # the seed is not tested
+        joined = {v for q in cl if len(q) > 1 and not set(q) <= seed for v in q} - seed
+        if crit is None:
+            assert not joined, (kw, [len(q) for q in cl])
+        else:   # joint R^2 with min_clique_size - 1 predictors reaches the critical value
+            k = max(1, min_size - 1)
+            def best_r2(v):
+                others = [u for u in range(15) if u != v]
+                return max(C[v, list(S)] @ np.linalg.solve(C[np.ix_(S, S)], C[list(S), v])
+                           for S in itertools.combinations(others, k))
+            assert all(best_r2(v) >= crit for v in joined)
+
+
+def test_mandatory_picks_with_signal():
+    """With real dependence, min_clique_size = 3 gives cliques of at least 3."""
+    rng = np.random.default_rng(1)
+    X = rng.standard_normal((300, 1)) + 0.5 * rng.standard_normal((300, 12))
+    C = np.corrcoef(X, rowvar=False)
     for rule in ("ftest", "bic"):
-        cl, seps, peo, _ = MFCF(min_clique_size=3, max_clique_size=5, acceptance=rule,
-                                alpha=1e-8, n_samples=300).run(C)
+        cl, _, _, _ = MFCF(gain_function_type="loglik", min_clique_size=3, max_clique_size=5,
+                           acceptance=rule, n_samples=300).run(C)
         assert all(len(q) >= 3 for q in cl)
 
 
@@ -385,7 +413,7 @@ def test_kendall_tau_b_matches_scipy_with_ties():
     np.testing.assert_allclose(_kendall_tau_b(X, gram_max_n=10), T, atol=1e-12)   # pairwise path
     for i in range(5):
         for j in range(5):
-            ref = 1.0 if i == j else stats.kendalltau(X[:, i], X[:, j]).statistic
+            ref = 1.0 if i == j else stats.kendalltau(X[:, i], X[:, j])[0]
             assert T[i, j] == pytest.approx(ref, abs=1e-12)
 
 
@@ -393,7 +421,7 @@ def test_spearman_mapping():
     rng = np.random.default_rng(4)
     X = rng.standard_normal((200, 4)) @ rng.standard_normal((4, 4))
     R = MFCF(max_clique_size=3).fit(X, correlation="spearman").correlation_
-    rs = stats.spearmanr(X).statistic
+    rs = stats.spearmanr(X)[0]
     np.testing.assert_allclose(R, 2 * np.sin(np.pi * rs / 6), atol=1e-12)
 
 
@@ -579,8 +607,11 @@ def test_mutual_information_similarity_in_fit():
     with warnings.catch_warnings():                 # unset gain: sumsquares, as before
         warnings.simplefilter("error")
         m3 = MFCF(max_clique_size=3).fit(X, similarity="mutual_information", mi_matrix=S)
-    assert m3._gf_type == "sumsquares" and m3._n_starts == 1
     assert {frozenset(q) for q in m3.cliques_} == {frozenset(q) for q in m2.cliques_}
+    # the switch applies to that fit only: a later correlation fit uses loglik
+    assert m3._gf_type == "loglik" and m3._n_starts == 3
+    fresh = MFCF(gain_function_type="loglik", max_clique_size=3).fit(X)
+    assert {frozenset(q) for q in m3.fit(X).cliques_} == {frozenset(q) for q in fresh.cliques_}
     with pytest.raises(ValueError):
         MFCF(gain_function_type="sumsquares").fit(X, similarity="distance")
 
@@ -669,3 +700,271 @@ def test_original_interface():
     assert {frozenset(q) for q in cl} == {frozenset(q) for q in ref[0]} and seps == ref[1]
     with pytest.raises(ValueError), pytest.warns(DeprecationWarning):
         MFCF().fast_mfcf(R, dict(ctl, method="PMFG"), "sumsquares")
+
+
+@pytest.mark.parametrize("make", [
+    lambda: __import__("mfcf_logo").MFCFLoGo(gain_function_type="loglik", max_clique_size=3),
+    lambda: __import__("mfcf_logo").MFCFLoGo(gain_function_type="sumsquares", max_clique_size=3, acceptance="threshold"),
+    lambda: __import__("mfcf_logo").MFCFLoGoCV(gain_function_type="loglik", max_clique_size_grid=[2, 3], cv=3),
+    lambda: __import__("mfcf_logo").MFCFLoGoCVAll(gain_function_type="loglik", n_trials=2, cv=3),
+])
+def test_full_sklearn_estimator_checks(make):
+    """Every check of sklearn's check_estimator passes (none fails)."""
+    import sklearn
+    from sklearn.utils.estimator_checks import check_estimator
+    pytest.importorskip("optuna")
+    if tuple(int(x) for x in sklearn.__version__.split(".")[:2]) < (1, 6):
+        pytest.skip("check_estimator(on_fail=None) needs scikit-learn >= 1.6")
+    res = check_estimator(make(), on_fail=None)
+    failed = [(r["check_name"], str(r["exception"])[:200]) for r in res if r["status"] == "failed"]
+    assert not failed, failed
+
+
+# ------------------------------------- golden outputs of the original code
+def _golden_runs():
+    import json
+    from pathlib import Path
+    path = Path(__file__).parent / "test_data" / "original_implementation_outputs.json"
+    return json.loads(path.read_text())["runs"]
+
+
+def _golden_matrix(seed, N):
+    rng = np.random.default_rng(seed); K0 = 4; sec = rng.integers(0, K0, N); T = 3 * N + 20
+    X = 0.5 * rng.standard_normal((T, 1)) + 0.8 * rng.standard_normal((T, K0))[:, sec] + rng.standard_normal((T, N))
+    X = X * rng.choice([-1, 1], N)
+    return np.corrcoef(X, rowvar=False)
+
+
+@pytest.mark.parametrize("run", _golden_runs(), ids=lambda r: "-".join(f"{k}{v}" for k, v in r["ctl"].items()
+                                                                       if k in ("method", "max_clique_size", "min_clique_size", "coordination_number", "threshold", "drop_sep")) + f"-s{r['seed']}")
+def test_original_implementation_reproduced(run):
+    """The legacy interface reproduces the original implementation (stored
+    outputs) exactly: cliques, separators with multiplicities and the
+    elimination order, including drop_sep and the TMFG seed."""
+    import warnings
+    from fast_fast_mfcf import mfcf_control
+    C = _golden_matrix(run["seed"], run["N"])
+    ctl = mfcf_control()
+    ctl.update({k: (np.inf if v is None else v) for k, v in run["ctl"].items()})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        cl, sp, peo, J = MFCF().fast_mfcf(C, ctl, "sumsquares")
+    if run["ctl"]["threshold"] > 0 and (run["ctl"]["coordination_number"] is not None or run["ctl"]["drop_sep"]):
+        pytest.skip("cap or drop_sep with a threshold: the original loses facets (documented)")
+    assert sorted(sorted(int(x) for x in q) for q in cl) == run["cliques"]
+    assert sorted([sorted(int(x) for x in s), int(v)] for s, v in sp.items() if len(s)) == run["separators"]
+    assert [int(v) for v in peo] == run["peo"]
+
+
+# --------------------------------------------- closing mutation-test gaps
+def test_starts_are_spread_over_the_network():
+    """With two independent blocks the second start lies in the other block."""
+    B = np.kron(np.eye(2), np.full((6, 6), 0.6)) + 0.4 * np.eye(12)
+    B = B + np.random.default_rng(0).uniform(0, 1e-3, B.shape); B = (B + B.T) / 2; np.fill_diagonal(B, 1)
+    m = MFCF(gain_function_type="loglik", max_clique_size=4, n_starts=2)
+    m._C = B
+    seeds = m._start_seeds(2)
+    first = next(iter(m._get_first_clique()))
+    second = next(iter(seeds[1]))
+    assert (first < 6) != (second < 6)
+
+
+@pytest.mark.parametrize("estimator", ["ksg", "histogram"])
+def test_mutual_information_gaussian_accuracy(estimator):
+    """For Gaussian data I = -1/2 log(1 - rho^2), so the Linfoot coefficient
+    sqrt(1 - exp(-2 I)) equals |rho|."""
+    from mutual_information import mutual_information_matrix
+    rng = np.random.default_rng(14)
+    rho = np.array([[1, .8, -.5, 0], [.8, 1, -.4, 0], [-.5, -.4, 1, 0], [0, 0, 0, 1]])
+    X = rng.multivariate_normal(np.zeros(4), rho, size=6000)
+    L = mutual_information_matrix(X, estimator=estimator)
+    raw = mutual_information_matrix(X, estimator=estimator, normalize="none")
+    iu = np.triu_indices(4, 1)
+    true = -0.5 * np.log(1 - rho[iu] ** 2)
+    tol = 0.04 if estimator == "ksg" else 0.06       # binning underestimates strong dependence
+    assert np.max(np.abs(raw[iu] - true)) < tol
+    strong = np.abs(rho[iu]) >= 0.4                  # Linfoot is ~|rho| away from zero
+    assert np.max(np.abs(L[iu][strong] - np.abs(rho[iu][strong]))) < 0.06
+
+
+def test_mutual_information_backends_agree():
+    """numba and sklearn KSG backends, numba and numpy histogram paths."""
+    import mutual_information as mi
+    rng = np.random.default_rng(15)
+    X = rng.standard_normal((400, 5)) @ rng.standard_normal((5, 5))
+    if mi._HAS_NUMBA:
+        a = mi.mutual_information_matrix(X, estimator="ksg", backend="numba", normalize="none")
+        b = mi.mutual_information_matrix(X, estimator="ksg", backend="sklearn", normalize="none")
+        np.testing.assert_allclose(a, b, atol=5e-3)
+    # unit-free: rescaling the variables does not change the estimate
+    s = np.array([1.0, 10.0, 1e-3, 7.0, 1e4])
+    for est in ("ksg", "histogram"):
+        np.testing.assert_allclose(mi.mutual_information_matrix(X, estimator=est, random_state=0),
+                                   mi.mutual_information_matrix(X * s, estimator=est, random_state=0), atol=2e-3)
+    B = mi._resolve_n_bins("auto", X.shape[0])
+    h1 = mi._histogram_raw_matrix(X, n_bins=B, n_jobs=None, use_numba=False)
+    if mi._HAS_NUMBA:
+        h2 = mi._histogram_raw_matrix(X, n_bins=B, n_jobs=None, use_numba=True)
+        np.testing.assert_allclose(h1, h2, atol=1e-10)
+
+
+def test_cv_caps_n_starts_at_each_clique_size():
+    from mfcf_logo import MFCFLoGoCV
+    X = np.random.default_rng(3).multivariate_normal(np.zeros(12), _chordal_model(p=12)[0], size=150)
+    cv = MFCFLoGoCV(gain_function_type="loglik", max_clique_size_grid=[2, 4], n_starts=4, cv=3).fit(X)
+    assert np.all(np.isfinite(cv.cv_results_["mean_test_score"]))      # k = 2 was evaluated
+
+
+def test_mfcflogo_passes_similarity_and_covariance():
+    from mfcf_logo import MFCFLoGo
+    rng = np.random.default_rng(16)
+    n, p = 1500, 6
+    X = np.zeros((n, p)); X[:, 0] = rng.standard_normal(n)
+    for v in range(1, p):
+        z = stats.norm.ppf(stats.rankdata(X[:, v - 1]) / (n + 1))
+        X[:, v] = z ** 2 - 1 + 0.3 * rng.standard_normal(n)
+    mi = MFCFLoGo(gain_function_type="sumsquares", max_clique_size=2, similarity="mutual_information").fit(X)
+    co = MFCFLoGo(gain_function_type="sumsquares", max_clique_size=2).fit(X)
+    assert {frozenset(q) for q in mi.cliques_} != {frozenset(q) for q in co.cliques_}
+    # a precomputed covariance is the matrix assembled into the precision
+    S = np.cov(X, rowvar=False, bias=True) * 4.0
+    m = MFCFLoGo(gain_function_type="sumsquares", max_clique_size=2).fit(
+        X, corr_matrix=np.corrcoef(X, rowvar=False), cov_matrix=S)
+    np.testing.assert_allclose(np.diag(np.linalg.inv(m.precision_)), np.diag(S), rtol=1e-8)
+
+
+def test_dbht_default_gain_takes_weights():
+    pytest.importorskip("riskfolio")
+    import inspect
+    from mfcf_dbht import mfcf_dbhts
+    assert inspect.signature(mfcf_dbhts).parameters["gain_function_type"].default == "sum"
+    rng = np.random.default_rng(17)
+    R = np.corrcoef(rng.standard_normal((300, 4))[:, np.repeat(np.arange(4), 4)] + rng.standard_normal((300, 16)), rowvar=False)
+    D = np.sqrt(np.clip(2 * (1 - R), 0, None)); np.fill_diagonal(D, 0)
+    S = np.exp(-D); np.fill_diagonal(S, 0.0)                     # similarity with zero diagonal
+    mfcf_dbhts(D, S, max_clique_size=4)                            # accepted by the default "sum" gain
+    with pytest.raises(ValueError):
+        mfcf_dbhts(D, S, max_clique_size=4, gain_function_type="sumsquares")
+
+
+@pytest.mark.parametrize("estimator", ["histogram", "ksg"])
+def test_mutual_information_independent_discrete_columns(estimator):
+    """Independent tied/discrete columns must not look dependent."""
+    from mutual_information import mutual_information_matrix
+    rng = np.random.default_rng(18)
+    X = np.column_stack([rng.integers(0, 3, 1000), rng.integers(0, 3, 1000), rng.standard_normal(1000)]).astype(float)
+    L = mutual_information_matrix(X, estimator=estimator, random_state=0)
+    assert L[0, 1] < 0.2
+
+
+def test_numba_failure_falls_back_to_general_path(monkeypatch):
+    """If a Numba kernel cannot be used (e.g. an unusable on-disk cache) the
+    result comes from the general path, with a RuntimeWarning."""
+    import fast_fast_mfcf as ff
+    if not ff._HAS_NUMBA:
+        pytest.skip("numba not installed")
+    R = _sample_corr(7, p=30, n=150)
+    ref = MFCF(gain_function_type="sumsquares", max_clique_size=4)
+    ref._use_fast_path = False
+    expected = ref.run(R)
+    def broken(*a, **k):
+        raise ModuleNotFoundError("No module named '<dynamic>'")
+    monkeypatch.setattr(ff, "_initial_argmax", broken)
+    with pytest.warns(RuntimeWarning, match="general path"):
+        got = MFCF(gain_function_type="sumsquares", max_clique_size=4).run(R)
+    assert {frozenset(q) for q in got[0]} == {frozenset(q) for q in expected[0]} and got[1] == expected[1]
+
+
+# --------------------------- regressions from the independent review (Oct 2026)
+@pytest.mark.parametrize("seed", range(8))
+@pytest.mark.parametrize("kw", [
+    dict(acceptance="bic", min_clique_size=2, max_clique_size=3, coordination_number=2),
+    dict(acceptance="ftest", min_clique_size=3, max_clique_size=4, coordination_number=2, threshold=0.2),
+    dict(threshold=0.05, max_clique_size=4, drop_sep=True),
+    dict(threshold=0.05, max_clique_size=4, coordination_number=2, drop_sep=True),
+])
+def test_relabelling_with_caps_and_thresholds(kw, seed):
+    """A facet blocked for one vertex stays available to the others, so the
+    forest does not depend on the order of the variables."""
+    rng = np.random.default_rng(seed)
+    p = 20
+    X = rng.standard_normal((60, p)) @ rng.standard_normal((p, p))
+    C = np.corrcoef(X, rowvar=False)
+    kw = dict(gain_function_type="loglik", n_samples=60, n_starts=1, **kw)
+    perm = rng.permutation(p)
+    a = MFCF(**kw).run(C)[0]
+    b = MFCF(**kw).run(C[np.ix_(perm, perm)])[0]
+    assert {frozenset(q) for q in a} == {frozenset(int(perm[i]) for i in q) for q in b}
+
+
+@pytest.mark.parametrize("bad", [dict(min_clique_size=4, max_clique_size=2), dict(coordination_number=0),
+                                 dict(coordination_number=0.5), dict(threshold=-0.1), dict(threshold=1.5),
+                                 dict(max_clique_size=0), dict(seed="tmfg", min_clique_size=6, max_clique_size=6)])
+def test_invalid_options_rejected(bad):
+    with pytest.raises(ValueError):
+        MFCF(gain_function_type="loglik", **bad)
+
+
+def test_singular_blocks_give_no_precision():
+    from mfcf_logo import MFCFLoGo
+    X = np.random.default_rng(1).standard_normal((4, 6))            # n < clique size
+    with pytest.warns(RuntimeWarning, match="singular"):
+        m = MFCF(gain_function_type="loglik", max_clique_size=4).fit(X)
+    assert m.precision_ is None
+    with pytest.raises(ValueError, match="shrinkage"), warnings_ignored():
+        MFCFLoGo(gain_function_type="loglik", max_clique_size=4).fit(X)
+    m = MFCF(gain_function_type="loglik", max_clique_size=4).fit(X, shrinkage=0.2)
+    assert np.all(np.isfinite(m.precision_)) and np.linalg.eigvalsh(m.precision_).min() > 0
+
+
+def warnings_ignored():
+    import warnings
+    cm = warnings.catch_warnings()
+    cm.__enter__(); warnings.simplefilter("ignore")
+    class _C:
+        def __enter__(self): return self
+        def __exit__(self, *a): cm.__exit__(*a)
+    return _C()
+
+
+@pytest.mark.parametrize("rule", ["ftest", "bic"])
+def test_precomputed_matrices_with_statistical_rules(rule):
+    from mfcf_logo import MFCFLoGo
+    X = np.random.default_rng(2).standard_normal((200, 8)) @ np.random.default_rng(3).standard_normal((8, 8))
+    m = MFCFLoGo(gain_function_type="loglik", acceptance=rule).fit(X, corr_matrix=np.corrcoef(X, rowvar=False))
+    assert np.all(np.isfinite(m.precision_))
+
+
+@pytest.mark.parametrize("kw", [dict(), dict(threshold=0.1), dict(acceptance="ftest", n_samples=200)])
+@pytest.mark.parametrize("n_starts", [1, None])
+def test_covariance_and_correlation_give_the_same_forest(kw, n_starts):
+    """The loglik gain is scale-invariant, and so are the seed and root rules."""
+    for seed in range(10):
+        rng = np.random.default_rng(seed)
+        X = (rng.standard_normal((200, 12)) @ rng.standard_normal((12, 12))) * rng.uniform(0.1, 10, 12)
+        S = np.cov(X, rowvar=False)
+        d = np.sqrt(np.diag(S))
+        a = MFCF(gain_function_type="loglik", max_clique_size=4, n_starts=n_starts, **kw).run(S)[0]
+        b = MFCF(gain_function_type="loglik", max_clique_size=4, n_starts=n_starts, **kw).run(S / np.outer(d, d))[0]
+        assert {frozenset(q) for q in a} == {frozenset(q) for q in b}
+
+
+def test_legacy_call_keeps_the_configuration():
+    import warnings
+    from fast_fast_mfcf import mfcf_control
+    m = MFCF(gain_function_type="loglik", max_clique_size=6)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m.fast_mfcf(_sample_corr(8, p=15, n=100), mfcf_control(), "sumsquares")
+    assert m._gf_type == "loglik" and m._max_clique_size == 6 and not m._drop_sep
+
+
+def test_input_checks():
+    import pandas as pd
+    C = _sample_corr(9, p=10, n=100)
+    a = MFCF(gain_function_type="loglik").run(pd.DataFrame(C))[0]
+    assert {frozenset(q) for q in a} == {frozenset(q) for q in MFCF(gain_function_type="loglik").run(C)[0]}
+    W = np.abs(C)
+    for bad in (W[:, :-1], np.where(np.eye(10) > 0, 1.0, np.nan), W + np.triu(np.ones((10, 10)), 1) * 0.1):
+        with pytest.raises(ValueError):
+            MFCF(gain_function_type="sum").run(bad)

@@ -171,6 +171,8 @@ class MFCFLoGo(EmpiricalCovariance):
                    else empirical_covariance(X, assume_centered=self.assume_centered))
         else:
             raise ValueError("similarity must be 'correlation' or 'mutual_information'")
+        if builder._n_samples is None:
+            builder._n_samples = float(X.shape[0])     # for the statistical rules
         cliques, seps, peo, J = builder.run(C=C, cov_matrix=cov)
         self.cliques_, self.separators_count_, self.peo_ = cliques, seps, peo
         self.n_effective_ = float(X.shape[0])
@@ -247,6 +249,10 @@ class MFCFLoGo(EmpiricalCovariance):
             self.peo_ = builder.peo_
             self.n_effective_ = builder.n_effective_
             self.precision_ = builder.precision_
+        if self.precision_ is None:
+            raise ValueError("No precision estimate: some clique blocks are singular (e.g. fewer "
+                             "observations than the clique size); set shrinkage > 0 or lower "
+                             "max_clique_size")
         if self.store_precision and not np.all(np.isfinite(self.precision_)):
             raise ValueError("Computed precision_ contains non-finite values.")
 
@@ -518,9 +524,8 @@ class MFCFLoGoCV(EmpiricalCovariance):
         grid = self._iter_grid(n_features)
 
         # CV splitter
-        kf = KFold(
-            n_splits=self.cv, shuffle=self.shuffle, random_state=self.random_state
-        )
+        kf = KFold(n_splits=self.cv, shuffle=self.shuffle,
+                   random_state=self.random_state if self.shuffle else None)
 
         split_scores_per_param: List[List[float]] = [[] for _ in grid]
         fold_records: List[_FoldScore] = []
@@ -886,7 +891,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             and "min_clique_size" in self.tunable_params
         ):
             params["max_clique_size"] = trial.suggest_int(
-                "max_clique_size", 2, min(32, n_features - 1), log=True
+                "max_clique_size", 2, max(2, min(32, n_features - 1)), log=True
             )
             params["min_clique_size"] = trial.suggest_int(
                 "min_clique_size", 1, params["max_clique_size"], log=True
@@ -898,8 +903,9 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             )
         elif "max_clique_size" in self.tunable_params:
             # Only tune max_clique_size, fixed min_clique_size
+            lo = max(2, int(self.min_clique_size))
             params["max_clique_size"] = trial.suggest_int(
-                "max_clique_size", 2, min(32, n_features - 1), log=True
+                "max_clique_size", lo, max(lo, min(32, n_features - 1)), log=True
             )
 
         if "coordination_number" in self.tunable_params:
