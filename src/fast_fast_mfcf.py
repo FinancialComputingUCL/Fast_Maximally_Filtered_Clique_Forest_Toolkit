@@ -517,6 +517,7 @@ def _kendall_tau_b(X: np.ndarray, block: int = 256, gram_max_n: int = 2000) -> n
                 T[i, j] = T[j, i] = stats.kendalltau(X[:, i], X[:, j])[0]
         return T
     G = np.zeros((p, p))
+    block = max(1, min(block, int(2e7 // max(1, n * p))))   # bounded memory (~160 MB)
     for k0 in range(0, n - 1, block):
         rows = range(k0, min(k0 + block, n - 1))
         D = np.concatenate([np.sign(X[k + 1:] - X[k]) for k in rows])
@@ -859,19 +860,31 @@ class Gains:
             ok = alive & (best >= 0)
             if t >= k:
                 ok &= best >= self._critical_pc2(t)
+            else:
+                # mandatory picks continue even when v is already explained
+                # exactly (or the remaining columns are collinear with S): the
+                # pick cannot change the gain; take the largest residual variance
+                fill = alive & (best < 0) & active.any(axis=1)
+                if fill.any():
+                    j = np.where(fill, np.argmax(np.where(active, duu, -np.inf), axis=1), j)
+                    ok |= fill
             alive = ok
             if not ok.any():
                 break
             r = np.flatnonzero(ok)
             jj = j[r]
             chosen[r, jj] = True
-            col = Mcc[r, :, jj]                       # cov(., u* | S), shape (len(r), c)
-            dvar = col[np.arange(len(r)), jj]
-            cv = mvc[r, jj]
-            Mcc[r] -= col[:, :, None] * col[:, None, :] / dvar[:, None, None]
-            mvc[r] -= cv[:, None] * col / dvar[:, None]
-            mvv[r] -= cv ** 2 / dvar
             active[r, jj] = False
+            dvar_all = Mcc[r, jj, jj]
+            sweep = dvar_all > tol * d0[jj]           # no update for a degenerate pick
+            r, jj = r[sweep], jj[sweep]
+            if len(r):
+                col = Mcc[r, :, jj]                   # cov(., u* | S), shape (len(r), c)
+                dvar = col[np.arange(len(r)), jj]
+                cv = mvc[r, jj]
+                Mcc[r] -= col[:, :, None] * col[:, None, :] / dvar[:, None, None]
+                mvc[r] -= cv[:, None] * col / dvar[:, None]
+                mvv[r] -= cv ** 2 / dvar
         ratio = np.clip(mvv / v0, tol, 1.0)
         gains = np.where(chosen.any(axis=1), -0.5 * np.log(ratio), 0.0)
         return gains, chosen
@@ -1072,7 +1085,10 @@ class MFCF:
         Global edge threshold used in gain computation and in deciding whether
         to start a new component when a popped candidate has insufficient gain.
     min_clique_size : int, default=1
-        Minimum size of any clique produced.
+        Minimum size of a clique formed by an attachment (the first
+        ``min_clique_size - 1`` picks of a separator are mandatory). Vertices
+        that fail the threshold or the test start new components, which can
+        be smaller.
     max_clique_size : int, default=4
         Upper bound on clique size. When a clique reaches this size, its facets
         (size-1 subsets) are used as candidate separators.
@@ -1276,6 +1292,8 @@ class MFCF:
             cov_matrix = np.asarray(cov_matrix, dtype=float)
             if cov_matrix.shape != C.shape:
                 raise ValueError("cov_matrix must have the shape of C")
+            if not np.all(np.isfinite(cov_matrix)) or not np.allclose(cov_matrix, cov_matrix.T, atol=1e-10):
+                raise ValueError("cov_matrix must be finite and symmetric")
         self._C = C
         self._Cs = None
         best = None
@@ -1962,7 +1980,7 @@ class MFCF:
             C1[self._C <= self._C.mean()] = 0
             return frozenset([int(np.argsort(-C1.sum(axis=0), kind="stable")[0])])
         if self._seed == "tmfg":
-            W = np.square(np.asarray(self._C, dtype=float))
+            W = np.square(self._scale_free())
             v = np.sum(W * (W > W.mean()), axis=1)
             return frozenset(int(x) for x in np.argsort(-v, kind="stable")[:4])
         Cs = self._scale_free()
@@ -2081,6 +2099,12 @@ class MFCF:
         if not (
             len(sep) >= self._min_clique_size - 1 and len(sep) < self._max_clique_size
         ):
+            facet = sep_wrapper.separator_prior_threshold
+            if facet != sep:          # blocked for this vertex only: keep the facet for others
+                excl = self._facet_excluded.setdefault(
+                    facet, np.zeros(len(self._outstanding_nodes_mask), bool))
+                excl[v] = True
+                self._update_pq_for_new_separator(facet)
             return True
         # subset-of-some-current-clique constraint
         if not any(sep.issubset(clq) for clq in self._cliques):

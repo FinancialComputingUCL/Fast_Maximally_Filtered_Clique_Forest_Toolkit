@@ -74,10 +74,22 @@ weights.
 - Seed and new-component rules on the correlation scale for `"loglik"`, so a
   covariance and its correlation give the same forest; exact ties in the
   seed rule broken by total strength (label-independent).
-- With the F-test or BIC, mandatory picks alone no longer attach a vertex: as
-  with the threshold rule, the total gain must reach that of one accepted
-  step (pure noise no longer forms a spanning structure when
-  `min_clique_size >= 2`).
+- With the F-test or BIC, as with the threshold rule, a vertex attaches only if
+  its total gain reaches that of one accepted step (the critical value of the
+  first test); with `min_clique_size = 2` pure noise is then attached only
+  through pairs that pass the test. With `min_clique_size >= 3` the mandatory
+  picks add up and can still exceed it, so noise can form structure; and each
+  test is applied to the best of many candidates without a correction for
+  that selection, so the statistical rules control sparsity only roughly.
+- An exactly collinear vertex (e.g. a duplicated column) with
+  `min_clique_size >= 3` and a threshold or test: the mandatory picks now
+  complete, so it attaches to its copy, and a facet blocked for one vertex
+  stays available to the others.
+- The TMFG seed is also computed on the correlation scale for `"loglik"`.
+- `run()` validates `cov_matrix` (finite, symmetric).
+- `mfcf_dbht` rejects a similarity that is zero on backbone edges (the
+  weighted graph would no longer be maximally planar).
+- Kendall's tau uses bounded memory for large p.
 - Numerically singular clique blocks (e.g. fewer observations than the clique
   size) give no precision (`None` and a RuntimeWarning in `MFCF`, an
   informative error in `MFCFLoGo`) instead of a meaningless inverse; use
@@ -106,7 +118,7 @@ weights.
   fold); tuned values in `best_params_`; `n_trials=0`/`None` refits with the fixed parameters (as
   documented); `random_state` also seeds the Optuna sampler (reproducible
   search); `error_score` is honoured; unknown `tunable_params` raise; the
-  clique-size range reaches `n_features`.
+  clique-size range reaches `min(32, n_features)`.
 - A numeric `n_effective` in the cross-validated estimators refers to the full
   sample and is scaled to each training fold.
 - `n_effective="auto"` uses autocorrelations about the sample mean (also with
@@ -120,7 +132,9 @@ weights.
   or crashed).
 - Mutual information: the KSG estimate is computed on standardised columns
   (it depended on the units of the variables; the numba and sklearn backends
-  now agree up to neighbour counts at exact distance ties, about 1e-3 nats);
+  agree on continuous data up to neighbour counts at exact distance ties,
+  about 1e-3 nats; on discrete or tied data KSG is unreliable and the two
+  backends can differ by about 0.1);
   `n_neighbors` is validated (0 crashed the interpreter); scikit-learn is
   needed only by the sklearn KSG backend; constant columns are rejected by
   both estimators; the histogram estimator needs 4 observations per bin; tied values share a histogram bin
@@ -144,5 +158,6 @@ weights.
   an eigendecomposition (about 10x faster for large p).
 - The log-likelihood gain is cached per separator (bounded memory) and uses
   closed-form facet updates; it runs at a cost comparable to the
-  sum-of-squares gain (p = 1600, K = 8, one start: a few seconds; the
-  default `n_starts = max_clique_size` multiplies this by K).
+  sum-of-squares gain (p = 1600, K = 8, one start, threshold 0: a few
+  seconds; the F-test about ten times longer; the default
+  `n_starts = max_clique_size` multiplies these by K).

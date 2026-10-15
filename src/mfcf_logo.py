@@ -268,6 +268,8 @@ class MFCFLoGo(EmpiricalCovariance):
             new_component=self.new_component,
             n_starts=self.n_starts,
         )
+        if mi_matrix is not None and self.similarity != "mutual_information":
+            raise ValueError("mi_matrix is used only with similarity='mutual_information'")
         if corr_matrix is not None or cov_matrix is not None:
             self._fit_precomputed(builder, X, corr_matrix, mi_matrix, cov_matrix)
         else:
@@ -280,7 +282,7 @@ class MFCFLoGo(EmpiricalCovariance):
                         mi_n_bins=self.mi_n_bins, mi_normalize=self.mi_normalize,
                         mi_n_jobs=self.mi_n_jobs, mi_random_state=self.mi_random_state,
                         mi_matrix=mi_matrix)
-            self.cliques_ = builder.cliques_
+            self.cliques_ = [frozenset(int(v) for v in q) for q in builder.cliques_]
             self.separators_count_ = builder.separators_
             self.peo_ = builder.peo_
             self.n_effective_ = builder.n_effective_
@@ -514,7 +516,7 @@ class MFCFLoGoCV(EmpiricalCovariance):
                 raise ValueError("max_clique_size_grid must contain integers")
             grid = sorted({int(k) for k in vals})
         else:
-            lower = max(2, int(self.min_clique_size))
+            lower = min(max(2, int(self.min_clique_size)), max(1, int(n_features)))
             upper = min(self.max_clique_size_grid, int(n_features))
             grid = list(range(lower, upper + 1))
         # filter feasibility
@@ -793,6 +795,13 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
 
     Attributes
     ----------
+    best_params_ : dict
+        Tuned values of `tunable_params` (empty without tuning).
+
+    cv_results_ : dict
+        One entry per Optuna trial: ``params``, ``mean_test_score`` (NaN for a
+        failed trial) and ``state``.
+
     covariance_ : ndarray of shape (n_features, n_features)
         Inverse of the LoGo precision estimate.
 
@@ -956,7 +965,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             )
         elif "max_clique_size" in self.tunable_params:
             # Only tune max_clique_size, fixed min_clique_size
-            lo = max(2, int(self.min_clique_size))
+            lo = min(max(2, int(self.min_clique_size)), max(2, n_features))
             params["max_clique_size"] = trial.suggest_int(
                 "max_clique_size", lo, max(lo, min(32, n_features)), log=True
             )
@@ -1081,8 +1090,16 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         )
 
         _check_configuration(self, X.shape[0], self.max_clique_size)
+        unknown = set(self.tunable_params or ()) - {"alpha", "threshold", "max_clique_size",
+                                                    "min_clique_size", "coordination_number"}
+        if unknown:
+            raise ValueError(f"Unknown tunable_params: {sorted(unknown)}")
         best_params = self._cross_validate(X)
-        self.cv_results_ = list(self._trials)          # one record per Optuna trial
+        self.cv_results_ = {                            # one entry per Optuna trial
+            "params": [t["params"] for t in self._trials],
+            "mean_test_score": np.array([t["mean_test_score"] for t in self._trials], dtype=float),
+            "state": [t["state"] for t in self._trials],
+        }
         self.best_params_ = {k: v for k, v in best_params.items()
                              if k in (self.tunable_params or ()) and self.n_trials}
 

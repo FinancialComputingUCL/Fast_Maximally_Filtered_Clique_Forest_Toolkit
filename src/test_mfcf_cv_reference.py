@@ -115,10 +115,13 @@ def test_cvall_matches_reference(tunable, data):
         warnings.simplefilter("ignore")
         m = MFCFLoGoCVAll(**kw).fit(X)
         m2 = MFCFLoGoCVAll(**kw).fit(X)
-    assert m.cv_results_ == m2.cv_results_                         # reproducible search
+    assert m.cv_results_["params"] == m2.cv_results_["params"]     # reproducible search
+    np.testing.assert_array_equal(m.cv_results_["mean_test_score"], m2.cv_results_["mean_test_score"])
     # every completed trial: its score is the reference mean CV score
     n_train_min = n - -(-n // 4)
-    complete = [t for t in m.cv_results_ if t["state"] == "COMPLETE"]
+    trials = [dict(params=p_, mean_test_score=v_, state=s_) for p_, v_, s_ in
+              zip(m.cv_results_["params"], m.cv_results_["mean_test_score"], m.cv_results_["state"])]
+    complete = [t for t in trials if t["state"] == "COMPLETE"]
     assert complete
     for t in complete:
         params = dict(fixed, **t["params"])
@@ -177,15 +180,17 @@ def test_cvall_with_failing_trials_matches_reference():
         m = MFCFLoGoCVAll(tunable_params=("max_clique_size",), n_trials=25, cv=4, shuffle=True,
                           random_state=2, error_score=0.0, **fixed).fit(X)
     n_train_min = 17 - -(-17 // 4)
-    states = {t["state"] for t in m.cv_results_}
+    trials = [dict(params=p_, mean_test_score=v_, state=s_) for p_, v_, s_ in
+              zip(m.cv_results_["params"], m.cv_results_["mean_test_score"], m.cv_results_["state"])]
+    states = {t["state"] for t in trials}
     assert "FAIL" in states and "COMPLETE" in states                       # failures do occur
-    partial = [t for t in m.cv_results_
+    partial = [t for t in trials
                if 0 < np.isnan(_reference_fold_scores(X, dict(fixed, **t["params"]), cv=4, shuffle=True,
                                                       random_state=2, n_train_for_neff=n_train_min)).sum() < 4]
     assert partial                                                          # some folds only
-    for t in m.cv_results_:
+    for t in trials:
         ref = _reference_fold_scores(X, dict(fixed, **t["params"]), cv=4, shuffle=True,
                                      random_state=2, n_train_for_neff=n_train_min)
         assert (t["state"] == "COMPLETE") == bool(np.all(np.isfinite(ref)))
-    best = max((t for t in m.cv_results_ if t["state"] == "COMPLETE"), key=lambda t: t["mean_test_score"])
+    best = max((t for t in trials if t["state"] == "COMPLETE"), key=lambda t: t["mean_test_score"])
     assert m.best_params_ == best["params"]

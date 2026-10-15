@@ -43,7 +43,8 @@ The KSG estimator has two backends:
   columns.  Typical scan length is ``~3 sqrt(n)`` for k=3 rather than ``n``.
 * ``"sklearn"`` — reference path via
   ``sklearn.feature_selection.mutual_info_regression``; both produce KSG
-  algorithm-1 estimates and agree to numerical tolerance.
+  algorithm-1 estimates; on continuous data they agree up to neighbour counts
+  at exact distance ties (about 1e-3 nats).
 
 The histogram estimator has a single hand-rolled numba kernel (with a pure
 numpy fallback when numba is unavailable).
@@ -63,8 +64,7 @@ Gaussian, so the MI path is a strict generalisation of the correlation path
 rather than a different objective.  Both estimators target the same population
 ``I(X;Y)``, so both Linfoot-normalised matrices converge to ``|Pearson rho|``
 under joint Gaussianity — i.e. correlation, KSG and histogram collapse to the
-same similarity matrix.  ``src/validate_mi_histogram.py`` demonstrates this and
-benchmarks the histogram path against correlation in the ``p >> n`` regime.
+same similarity matrix.
 """
 
 from __future__ import annotations
@@ -878,7 +878,7 @@ def mutual_information_matrix(
     if isinstance(random_state, np.random.Generator):
         random_state = int(random_state.integers(2**31 - 1))
     sd = X.std(axis=0)
-    if np.any(sd <= 1e-12 * np.maximum(1.0, np.abs(X).max(axis=0))):
+    if np.any(sd <= 1e-12 * np.abs(X).max(axis=0)):          # relative: scale-free
         raise ValueError("X has constant columns; mutual information is undefined.")
     if random_state is None:
         random_state = 0      # reproducible tie-breaking jitter by default
@@ -904,6 +904,8 @@ def mutual_information_matrix(
             backend=backend,
         )
     else:
+        if backend == "numba" and not _HAS_NUMBA:
+            raise RuntimeError("backend='numba' was requested but numba is not importable.")
         n_bins_resolved = _resolve_n_bins(n_bins, n_samples)
         if n_samples < 4 * n_bins_resolved:
             raise ValueError(f"the histogram estimator needs at least 4 observations per bin "

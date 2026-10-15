@@ -86,13 +86,17 @@ Each step is accepted by:
 - `acceptance="bic"`: `n_samples * (-log(1 - rho^2)) > log(n_samples)`.
 
 The statistical rules scale with the sample size and with the number of
-variables already in `S`, so they give a validated, data-driven sparsity. The
-mandatory `min_clique_size - 1` picks bypass the rule. A vertex starts a new
-component when no attachment is accepted.
+variables already in `S`, so they give a data-driven sparsity; each test is
+applied to the best of many candidates without a correction for that
+selection, so on pure noise some edges still pass at the nominal level. The
+mandatory `min_clique_size - 1` picks bypass the rule, but a vertex attaches
+only if its total gain reaches that of one accepted step; otherwise it starts
+a new component (with `min_clique_size >= 3` several mandatory picks can add
+up past that bar).
 
 Because the in-sample likelihood can only grow with `S`, `threshold=0` accepts
-every step: every clique then grows to `max_clique_size`, and the result is the
-fixed-size construction. Variable clique sizes come from `threshold > 0` or a
+every step: every clique then grows to `max_clique_size` (for data without
+exact ties), and the result is the fixed-size construction. Variable clique sizes come from `threshold > 0` or a
 statistical rule.
 
 With `"sumsquares"` and `"sum"`, `threshold` applies to each `C[v,u]^2` or

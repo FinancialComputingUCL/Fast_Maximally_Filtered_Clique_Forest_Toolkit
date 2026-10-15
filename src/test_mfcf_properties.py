@@ -964,7 +964,7 @@ def test_legacy_call_keeps_the_configuration():
 
 
 def test_input_checks():
-    import pandas as pd
+    pd = pytest.importorskip("pandas")
     C = _sample_corr(9, p=10, n=100)
     a = MFCF(gain_function_type="loglik").run(pd.DataFrame(C))[0]
     assert {frozenset(q) for q in a} == {frozenset(q) for q in MFCF(gain_function_type="loglik").run(C)[0]}
@@ -1227,3 +1227,75 @@ def test_tmfg_equivalent_backbone_is_maximally_planar(gain, seed_rule):
         G = nx.Graph(); G.add_nodes_from(range(p))
         G.add_edges_from((a, b) for q in cl for a in q for b in q if a < b)
         assert nx.check_planarity(G)[0] and G.number_of_edges() == 3 * p - 6
+
+
+# ------------------------ regressions from the fifth review round (Oct 2026)
+@pytest.mark.parametrize("kw", [dict(threshold=0.05), dict(acceptance="ftest"), dict(acceptance="bic")])
+def test_exactly_collinear_vertex_joins_its_twin(kw):
+    """min_clique_size >= 3: a duplicated column attaches to its copy (the
+    mandatory picks complete even once the vertex is explained exactly)."""
+    rng = np.random.default_rng(0)
+    X = rng.standard_normal((200, 10)) @ rng.standard_normal((10, 10))
+    X[:, 8] = X[:, 2]
+    with warnings_ignored():
+        m = MFCF(gain_function_type="loglik", min_clique_size=3, max_clique_size=4,
+                 n_starts=1, **kw).fit(X, shrinkage=0.01)
+    assert any({2, 8} <= set(q) for q in m.cliques_)
+
+
+def test_tmfg_seed_is_scale_free_for_loglik():
+    rng = np.random.default_rng(1)
+    X = (rng.standard_normal((300, 10)) @ rng.standard_normal((10, 10))) * np.linspace(0.1, 10, 10)
+    S = np.cov(X, rowvar=False); d = np.sqrt(np.diag(S))
+    kw = dict(gain_function_type="loglik", max_clique_size=4, seed="tmfg", n_starts=1)
+    a = MFCF(**kw).run(S)[0]; b = MFCF(**kw).run(S / np.outer(d, d))[0]
+    assert {frozenset(q) for q in a} == {frozenset(q) for q in b}
+
+
+def test_dbht_rejects_zero_similarity_on_backbone_edges():
+    pytest.importorskip("riskfolio")
+    from mfcf_dbht import mfcf_dbhts
+    found = False
+    for seed in range(40):
+        X = np.random.default_rng(seed).normal(size=(60, 10))
+        R = np.corrcoef(X, rowvar=False)
+        D = np.sqrt(np.clip(2 * (1 - R), 0, None)); np.fill_diagonal(D, 0)
+        S = np.clip(R, 0, None)
+        try:
+            out = mfcf_dbhts(D, S)
+        except ValueError as e:
+            found |= "zero similarity" in str(e)
+            continue
+        assert np.count_nonzero(np.triu(out[1], 1)) == 3 * 10 - 6     # never a broken backbone
+    assert found
+
+
+def test_run_validates_cov_matrix():
+    C = _sample_corr(2, p=8, n=100)
+    bad = C.copy(); bad[0, 1] = np.nan
+    with pytest.raises(ValueError):
+        MFCF(gain_function_type="loglik").run(C, cov_matrix=bad)
+    asym = C.copy(); asym[0, 1] += 0.1
+    with pytest.raises(ValueError):
+        MFCF(gain_function_type="loglik").run(C, cov_matrix=asym)
+
+
+def test_estimator_interface_details():
+    from mfcf_logo import MFCFLoGo, MFCFLoGoCV, MFCFLoGoCVAll
+    X = np.random.default_rng(3).standard_normal((60, 6))
+    with pytest.raises(ValueError, match="mi_matrix"):
+        MFCFLoGo(gain_function_type="loglik").fit(X, mi_matrix=np.eye(6))
+    m = MFCFLoGo(gain_function_type="sumsquares", similarity="mutual_information",
+                 mi_estimator="histogram").fit(X)
+    assert all(type(v) is int for q in m.cliques_ for v in q)
+    cv = MFCFLoGoCV(gain_function_type="loglik", cv=3).fit(X[:, :1])         # p = 1
+    assert cv.best_max_clique_size_ == 1
+    with pytest.raises(ValueError, match="tunable"):
+        MFCFLoGoCVAll(gain_function_type="loglik", tunable_params=["foo"], n_trials=0).fit(X)
+
+
+def test_mutual_information_constant_check_is_scale_free():
+    from mutual_information import mutual_information_matrix
+    X = np.random.default_rng(4).standard_normal((300, 3))
+    np.testing.assert_allclose(mutual_information_matrix(X * 1e-13, estimator="histogram"),
+                               mutual_information_matrix(X, estimator="histogram"))

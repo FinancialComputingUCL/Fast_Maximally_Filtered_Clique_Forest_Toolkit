@@ -173,6 +173,9 @@ def mfcf_dbhts(
     if n_edges != 3 * p - 6:       # a planar 3-tree (Apollonian network) is maximally planar
         raise ValueError("DBHT requires a maximally planar backbone (3p - 6 edges)")
     Rpm = _convert_cliques_to_adjacency(cliques, S)
+    if np.count_nonzero(np.triu(Rpm, 1)) != 3 * p - 6:
+        raise ValueError("Some backbone edges have zero similarity, so the weighted graph is "
+                         "not maximally planar; use a strictly positive S, e.g. (1 + R) / 2")
     if not _is_connected(Rpm):
         raise ValueError(
             "DBHT requires a connected MFCF graph, but the attachment rule left "
