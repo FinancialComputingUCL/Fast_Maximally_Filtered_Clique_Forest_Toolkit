@@ -44,7 +44,7 @@ def mfcf_dbhts(
     threshold: float = 0.0,
     min_clique_size: int = 1,
     max_clique_size: int = 4,
-    coordination_number: int = np.inf,
+    coordination_number: int = 1,
     gain_function_type: str = "sum",
     acceptance: str = "threshold",
     alpha: float = 0.05,
@@ -86,8 +86,9 @@ def mfcf_dbhts(
     max_clique_size : int, default=4
         Must be 4: the DBHT steps require 4-cliques joined by triangles.
 
-    coordination_number : float, default=np.inf
-        Maximum allowed uses of a separator (multiplicity cap) during MFCF.
+    coordination_number : int, default=1
+        Must be 1: each triangle joins at most two 4-cliques, so the backbone
+        is planar (TMFG type), as the DBHT steps assume.
 
     Returns
     -------
@@ -115,7 +116,11 @@ def mfcf_dbhts(
     Raises
     ------
     ValueError
-        If ``D`` or ``S`` is not square or the shapes are inconsistent.
+        If ``D`` or ``S`` is not square, the shapes differ, they contain
+        non-finite values, ``D`` or ``S`` has negative off-diagonal entries,
+        there are fewer than 4 variables, or the backbone is not of the TMFG
+        type (``max_clique_size=4``, ``coordination_number=1``, every vertex
+        attached).
 
     Notes
     -----
@@ -125,9 +130,22 @@ def mfcf_dbhts(
     """
 
     S = np.asarray(S, dtype=float)
-    if np.any(S[~np.eye(S.shape[0], dtype=bool)] < 0):
+    D = np.asarray(D, dtype=float)
+    if S.ndim != 2 or S.shape[0] != S.shape[1] or D.shape != S.shape:
+        raise ValueError("D and S must be square matrices of the same shape")
+    if S.shape[0] < 4:
+        raise ValueError("DBHT needs at least 4 variables")
+    if not (np.all(np.isfinite(S)) and np.all(np.isfinite(D))):
+        raise ValueError("D and S must be finite")
+    off = ~np.eye(S.shape[0], dtype=bool)
+    if np.any(S[off] < 0):
         raise ValueError("DBHT needs a non-negative similarity S (e.g. (1 + R) / 2 for a "
                          "correlation matrix R)")
+    if np.any(D[off] < 0):
+        raise ValueError("D must be a non-negative dissimilarity")
+    if coordination_number != 1:
+        raise ValueError("DBHT requires coordination_number=1 (a planar backbone of the TMFG "
+                         "type; other values give non-planar graphs that DBHT mishandles)")
     builder = _MFCFBuilder(
         threshold=threshold,
         min_clique_size=min_clique_size,
@@ -144,7 +162,7 @@ def mfcf_dbhts(
         raise ValueError("DBHT requires max_clique_size=4 (a backbone of 4-cliques joined by "
                          "triangles, as in the TMFG)")
     cliques, seps, _, _ = builder.run(C=S, cov_matrix=np.eye(S.shape[0]))
-    if S.shape[0] >= 4 and (any(len(q) != 4 for q in cliques)
+    if (any(len(q) != 4 for q in cliques)
                             or any(len(sp) != 3 for sp in seps if len(sp))):
         raise ValueError("DBHT requires a backbone of 4-cliques joined by triangles; use "
                          "threshold=0 and min_clique_size <= 4 so that every clique has 4 vertices")

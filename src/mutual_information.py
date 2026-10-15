@@ -718,10 +718,7 @@ def _ksg_raw_matrix(
     # Standardise the columns: the max-norm KSG estimate is not invariant to
     # rescaling a variable, and sklearn's reference path standardises too, so
     # both backends now give the same, unit-free estimate.
-    sd = X.std(axis=0)
-    if np.any(sd == 0):
-        raise ValueError("X has constant columns; mutual information is undefined.")
-    X = (X - X.mean(axis=0)) / sd
+    X = (X - X.mean(axis=0)) / X.std(axis=0)
     # Kraskov-style tie-breaking jitter: scaled by the per-column mean
     # absolute magnitude so it never dominates the data signal.
     rng = np.random.RandomState(random_state)
@@ -876,6 +873,13 @@ def mutual_information_matrix(
             raise ValueError(f"n_neighbors must be an integer >= 1, got {n_neighbors!r}.")
     if n_jobs is not None and (isinstance(n_jobs, bool) or not isinstance(n_jobs, (int, np.integer))):
         raise ValueError(f"n_jobs must be an integer or None, got {n_jobs!r}.")
+    if n_jobs == 0:
+        n_jobs = None                       # same meaning on every backend
+    if isinstance(random_state, np.random.Generator):
+        random_state = int(random_state.integers(2**31 - 1))
+    sd = X.std(axis=0)
+    if np.any(sd <= 1e-12 * np.maximum(1.0, np.abs(X).max(axis=0))):
+        raise ValueError("X has constant columns; mutual information is undefined.")
     if random_state is None:
         random_state = 0      # reproducible tie-breaking jitter by default
 
@@ -901,6 +905,9 @@ def mutual_information_matrix(
         )
     else:
         n_bins_resolved = _resolve_n_bins(n_bins, n_samples)
+        if n_samples < 4 * n_bins_resolved:
+            raise ValueError(f"the histogram estimator needs at least 4 observations per bin "
+                             f"(n_samples={n_samples}, n_bins={n_bins_resolved})")
         use_numba = backend != "sklearn" and _HAS_NUMBA
         M = _histogram_raw_matrix(
             X,

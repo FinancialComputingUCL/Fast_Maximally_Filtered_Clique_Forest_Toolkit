@@ -5,7 +5,7 @@ Accelerated Maximally Filtered Clique Forest (MFCF) implementations for sparse p
 ## Introduction
 - Build MFCF backbones from dense similarity matrices in a few seconds.
 - Drop-in graphical-model estimators (`MFCFLoGo`, `MFCFLoGoCV`, `MFCFLoGoCVAll`) that follow the scikit-learn API and offer a faster, more accurate alternative to Graphical Lasso when the sample-to-feature ratio is small.
-- Run Riskfolio-Lib’s Direct Bubble Hierarchical Tree (DBHT) clustering on an MFCF backbone of 4-cliques joined by triangles (the TMFG class, with a choice of gain and coordination cap) (`mfcf_dbht`).
+- Run Riskfolio-Lib’s Direct Bubble Hierarchical Tree (DBHT) clustering on a planar MFCF backbone of 4-cliques joined by triangles (the TMFG class, with a choice of gain) (`mfcf_dbht`).
 - Gaussian log-likelihood gain with statistical validation (F-test, BIC), several starts, and decomposable maximum-likelihood precision built directly from data (`MFCF.fit`).
 - Dependence beyond correlation: rank (Spearman, Kendall) and mutual-information (KSG, histogram) similarities (`mutual_information`).
 - One package for all earlier lines of development: the original `fast_fast_mfcf`, the toolkit `main` branch and the `mutual_info` branch (see *Compatibility with earlier versions*).
@@ -157,10 +157,13 @@ m.n_effective_                            # observations used by the test
   matrices use `run(C)`.
 - `similarity="mutual_information"` builds the structure on the pairwise
   mutual information in Linfoot's normalisation `sqrt(1 - exp(-2 I))`, which
-  captures non-linear and tail dependence (it equals `|rho|` for Gaussian
-  data). Estimators: `mi_estimator="ksg"` (k-nearest neighbours, default) or
-  `"histogram"` (equal-frequency bins, much faster; the choice for discrete or
-  heavily tied data, where KSG is biased). It requires the
+  captures non-linear and tail dependence (for Gaussian data it estimates
+  `|rho|`). Estimators: `mi_estimator="ksg"` (k-nearest neighbours, default;
+  consistent, but biased under extreme skewness, e.g. `exp(8x)` margins, so
+  rank-transform such data first) or `"histogram"` (equal-frequency bins,
+  much faster and exactly invariant to monotone transformations; the choice
+  for discrete or heavily tied data, where KSG is biased; with at most 12 bins
+  it underestimates strong dependence, e.g. 0.88 for `rho = 0.9`). It requires the
   `"sumsquares"` or `"sum"` gain; the precision is still assembled from the
   correlation blocks. The matrix can be precomputed with
   `mutual_information.mutual_information_matrix(X)` and passed as
@@ -170,7 +173,7 @@ The LoGo estimators (`MFCFLoGo`, `MFCFLoGoCV`, `MFCFLoGoCVAll`) are built on
 `fit(X)` and accept the same options (`acceptance`, `alpha`, `new_component`,
 `n_starts`, `shrinkage`, `n_effective`, `correlation`, `similarity` and the
 `mi_*` options); `MFCFLoGoCVAll` can tune `alpha`
-(`tunable_params=("alpha", ...)`). Their `precision_` and `covariance_` are on
+(`tunable_params=("alpha", ...)`) and stores the tuned values in `best_params_`. Their `precision_` and `covariance_` are on
 the covariance scale of the data (earlier versions returned the precision of
 the correlation matrix).
 
@@ -293,9 +296,9 @@ The backbone is built on a non-negative similarity `S` (checked) with the
 `"sum"` gain (default); for a correlation matrix `R` use, for instance,
 `S = (1 + R) / 2`, which is also a valid input for `"loglik"` and
 `"sumsquares"`. The DBHT steps assume 4-cliques joined by triangles (the TMFG
-class), so `max_clique_size` must be 4 and every vertex attached (threshold
-0); `coordination_number=1` gives the planar TMFG-type graph. Other backbones
-raise an error.
+class), so `max_clique_size` must be 4, `coordination_number` 1 (the
+default: each triangle joins at most two cliques, a planar TMFG-type graph)
+and every vertex attached (threshold 0). Other backbones raise an error.
 
 ```python
 import numpy as np

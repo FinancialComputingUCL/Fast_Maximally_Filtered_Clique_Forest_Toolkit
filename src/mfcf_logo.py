@@ -12,6 +12,24 @@ from sklearn.utils.validation import check_array, check_is_fitted
 from fast_fast_mfcf import MFCF as _MFCFBuilder
 
 
+def _check_configuration(est, n_samples: int, max_clique_size: int) -> None:
+    """Fail early on configuration errors, which cross-validation would
+    otherwise report as failed folds."""
+    if est.similarity not in ("correlation", "mutual_information"):
+        raise ValueError("similarity must be 'correlation' or 'mutual_information'")
+    if est.correlation not in ("pearson", "spearman", "kendall"):
+        raise ValueError("correlation must be 'pearson', 'spearman' or 'kendall'")
+    ne = est.n_effective
+    if not (ne is None or (isinstance(ne, str) and ne == "auto")):
+        if isinstance(ne, str) or not 3 <= float(ne) <= n_samples:
+            raise ValueError("n_effective must be None, 'auto' or a number between 3 and n_samples")
+    n_starts = est.n_starts if est.n_starts is None else min(est.n_starts, max_clique_size)
+    _MFCFBuilder(threshold=est.threshold, min_clique_size=est.min_clique_size,
+                 max_clique_size=max_clique_size, coordination_number=est.coordination_number,
+                 gain_function_type=est.gain_function_type, acceptance=est.acceptance,
+                 alpha=est.alpha, new_component=est.new_component, n_starts=n_starts)
+
+
 def _fold_n_effective(n_effective, n_train: int, n_total: int):
     """A numeric n_effective refers to the full sample: scale it to a fold."""
     if n_effective is None or isinstance(n_effective, str):
@@ -158,10 +176,21 @@ class MFCFLoGo(EmpiricalCovariance):
     def _fit_precomputed(self, builder, X, corr_matrix, mi_matrix, cov_matrix):
         """Interface of the `mutual_info` branch: run on precomputed matrices."""
         from sklearn.covariance import empirical_covariance
+        p = X.shape[1]
+        for name, M in (("corr_matrix", corr_matrix), ("mi_matrix", mi_matrix), ("cov_matrix", cov_matrix)):
+            if M is not None and np.shape(M) != (p, p):
+                raise ValueError(f"{name} must have shape ({p}, {p}), matching X")
+        if self.similarity == "correlation" and mi_matrix is not None:
+            raise ValueError("mi_matrix is used only with similarity='mutual_information'")
+        if self.similarity == "mutual_information" and corr_matrix is not None:
+            raise ValueError("corr_matrix is used only with similarity='correlation'")
         if self.similarity == "mutual_information" and builder._gain_unset:
             builder._gf_type, builder._gain_unset = "sumsquares", False
             if builder._n_starts_auto:
                 builder._n_starts = 1
+        if self.similarity == "mutual_information" and builder._gf_type == "loglik":
+            raise ValueError("similarity='mutual_information' needs gain_function_type='sumsquares' "
+                             "or 'sum' (the information matrix is not a covariance)")
         if self.similarity == "correlation":
             C = corr_matrix if corr_matrix is not None else np.corrcoef(X, rowvar=False)
             cov = cov_matrix if cov_matrix is not None else C
@@ -480,7 +509,10 @@ class MFCFLoGoCV(EmpiricalCovariance):
     # ------------------------------ utils ------------------------------
     def _iter_grid(self, n_features: int) -> List[int]:
         if not isinstance(self.max_clique_size_grid, (int, np.integer)):
-            grid = sorted({int(k) for k in self.max_clique_size_grid})
+            vals = list(self.max_clique_size_grid)
+            if any(isinstance(k, bool) or float(k) != int(k) for k in vals):
+                raise ValueError("max_clique_size_grid must contain integers")
+            grid = sorted({int(k) for k in vals})
         else:
             lower = max(2, int(self.min_clique_size))
             upper = min(self.max_clique_size_grid, int(n_features))
@@ -531,6 +563,7 @@ class MFCFLoGoCV(EmpiricalCovariance):
         grid = self._iter_grid(n_features)
 
         # CV splitter
+        _check_configuration(self, X.shape[0], max(grid))
         kf = KFold(n_splits=self.cv, shuffle=self.shuffle,
                    random_state=self.random_state if self.shuffle else None)
 
@@ -958,11 +991,17 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
 
             cv = KFold(n_splits=self.cv, shuffle=self.shuffle,
                        random_state=self.random_state if self.shuffle else None)
-            scores = cross_val_score(
-                est, X, y=None, scoring=log_likelihood_scorer, cv=cv, n_jobs=self.n_jobs,
-                error_score=self.error_score,
-            )
-            return scores.mean()
+            try:
+                scores = cross_val_score(
+                    est, X, y=None, scoring=log_likelihood_scorer, cv=cv, n_jobs=self.n_jobs,
+                    error_score="raise" if self.error_score == "raise" else np.nan,
+                )
+            except Exception:
+                if self.error_score == "raise":
+                    raise
+                return float("nan")          # failed trial: never selected
+            # a configuration with any failed fold is not eligible
+            return float(scores.mean()) if np.all(np.isfinite(scores)) else float("nan")
 
         if not self.n_trials or not self.tunable_params:      # no tuning: fixed parameters
             best_params = {}
@@ -970,6 +1009,11 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             sampler = optuna.samplers.TPESampler(seed=self.random_state)  # reproducible search
             study = optuna.create_study(direction="maximize", sampler=sampler)
             study.optimize(objective, n_trials=int(self.n_trials))
+            complete = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+            if not complete:
+                raise ValueError("Every trial failed in cross-validation (e.g. clique sizes larger "
+                                 "than the training folds support); use shrinkage > 0, fewer "
+                                 "tunable clique sizes or more observations")
             best_params = study.best_params
         final_params = dict(
             threshold=self.threshold,
@@ -1032,7 +1076,10 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             else X.mean(axis=0)
         )
 
+        _check_configuration(self, X.shape[0], self.max_clique_size)
         best_params = self._cross_validate(X)
+        self.best_params_ = {k: v for k, v in best_params.items()
+                             if k in (self.tunable_params or ()) and self.n_trials}
 
         # Refit on all data with best parameter
         final = MFCFLoGo(**best_params, assume_centered=self.assume_centered)

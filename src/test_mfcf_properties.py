@@ -1130,3 +1130,82 @@ def test_raw_mutual_information_needs_the_sum_gain():
                                                   mi_estimator="histogram", mi_normalize="none")
     MFCF(gain_function_type="sum").fit(X, similarity="mutual_information",
                                        mi_estimator="histogram", mi_normalize="none")
+
+
+# ----------------------- regressions from the fourth review pass (Oct 2026)
+def test_cvall_survives_trials_whose_folds_all_fail():
+    pytest.importorskip("optuna")
+    import optuna, warnings
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    from mfcf_logo import MFCFLoGoCVAll
+    rng = np.random.default_rng(0)
+    X = rng.standard_normal((30, 40)) + rng.standard_normal((30, 1))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = MFCFLoGoCVAll(gain_function_type="loglik", tunable_params=("max_clique_size",),
+                          n_trials=12, random_state=0).fit(X)
+    assert np.all(np.isfinite(m.precision_)) and "max_clique_size" in m.best_params_
+
+
+def test_dbht_requires_planar_backbone_and_valid_inputs():
+    pytest.importorskip("riskfolio")
+    from mfcf_dbht import mfcf_dbhts
+    X, g = _blocks_data(k=3, p_block=5)
+    R = np.corrcoef(X, rowvar=False)
+    D = np.sqrt(np.clip(2 * (1 - R), 0, None)); np.fill_diagonal(D, 0)
+    S = (1 + R) / 2
+    with pytest.raises(ValueError, match="coordination_number"):
+        mfcf_dbhts(D, S, coordination_number=np.inf)
+    Dn = D.copy(); Dn[0, 1] = Dn[1, 0] = np.nan
+    for bad in ((D[:-1, :-1], S), (D, S[:, :-1]), (Dn, S), (-D, S), (D[:3, :3], S[:3, :3])):
+        with pytest.raises(ValueError):
+            mfcf_dbhts(*bad)
+    # default (planar backbone): clustering quality comparable to riskfolio's
+    # TMFG-based DBHT (perfect on 28 of 30 block datasets vs 27 of 30)
+    from scipy.cluster.hierarchy import fcluster
+    from sklearn.metrics import adjusted_rand_score
+    aris = []
+    for seed in range(5):
+        X, g = _blocks_data(k=4, p_block=10, seed=seed)
+        R = np.corrcoef(X, rowvar=False)
+        D = np.sqrt(np.clip(2 * (1 - R), 0, None)); np.fill_diagonal(D, 0)
+        aris.append(adjusted_rand_score(g, fcluster(mfcf_dbhts(D, (1 + R) / 2)[5], 4, "maxclust")))
+    assert np.mean(aris) >= 0.9
+
+
+def test_precomputed_interface_checks_shapes_and_roles():
+    from mfcf_logo import MFCFLoGo
+    X = np.random.default_rng(1).standard_normal((100, 8))
+    with pytest.raises(ValueError, match="shape"):
+        MFCFLoGo(gain_function_type="loglik").fit(X, corr_matrix=np.eye(5))
+    with pytest.raises(ValueError, match="mi_matrix"):
+        MFCFLoGo(gain_function_type="loglik").fit(X, corr_matrix=np.corrcoef(X, rowvar=False),
+                                                  mi_matrix=np.eye(8))
+    with pytest.raises(ValueError, match="mutual_information"):
+        MFCFLoGo(gain_function_type="loglik", similarity="mutual_information").fit(
+            X, mi_matrix=np.eye(8), cov_matrix=np.cov(X, rowvar=False))
+
+
+@pytest.mark.parametrize("kw", [dict(similarity="bogus"), dict(n_effective=1e6), dict(n_effective="bogus"),
+                                dict(n_starts=0), dict(max_clique_size_grid=[2.9, 3.5])])
+def test_cv_reports_configuration_errors_directly(kw):
+    from mfcf_logo import MFCFLoGoCV
+    X = np.random.default_rng(2).standard_normal((60, 6))
+    kw = dict(dict(gain_function_type="loglik", max_clique_size_grid=[2, 3], cv=3), **kw)
+    with pytest.raises(ValueError) as e:
+        MFCFLoGoCV(**kw).fit(X)
+    assert "Every max_clique_size" not in str(e.value)
+
+
+def test_mutual_information_input_conventions():
+    from mutual_information import mutual_information_matrix
+    rng = np.random.default_rng(3)
+    X = rng.standard_normal((300, 3))
+    for est in ("ksg", "histogram"):
+        Xc = X.copy(); Xc[:, 1] = 1 / 3
+        with pytest.raises(ValueError, match="constant"):
+            mutual_information_matrix(Xc, estimator=est)
+    a = mutual_information_matrix(X, n_jobs=0, random_state=np.random.default_rng(0))
+    assert a.shape == (3, 3)
+    with pytest.raises(ValueError, match="per bin"):
+        mutual_information_matrix(X[:2], estimator="histogram")
