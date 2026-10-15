@@ -3,12 +3,14 @@ Tools for performing Direct Bubble Hierarchical Tree (DBHT) clustering
 using a Maximally Filtered Clique Forest (MFCF) backbone.
 
 This module replaces the TMFG graph-construction step in the original
-riskfolio DBHT implementation with an MFCF-based builder. The DBHT steps of
-riskfolio assume a backbone of 4-cliques joined by triangles (as in the
-TMFG), so the MFCF must be built with ``max_clique_size=4`` and every vertex
-attached (threshold 0); other backbones are rejected with an error. Within
-that class the gain and the coordination cap can be chosen (e.g.
-``coordination_number=1`` gives the planar TMFG-type graph).
+riskfolio DBHT implementation with an MFCF-based builder. DBHT is defined
+for maximally planar graphs (the TMFG). The MFCF equivalent is built with
+4-cliques, triangle separators each used at most once and every vertex
+attached (``max_clique_size=4``, ``coordination_number=1``, threshold 0): a
+planar 3-tree (Apollonian network), hence maximally planar with 3p - 6 edges.
+Other backbones are rejected with an error. The gain and the seed can be
+chosen; the backbone is of the TMFG type but not, in general, the same graph
+as riskfolio's own TMFG, which inserts vertices by its own rule.
 
 Functions
 ---------
@@ -166,6 +168,10 @@ def mfcf_dbhts(
                             or any(len(sp) != 3 for sp in seps if len(sp))):
         raise ValueError("DBHT requires a backbone of 4-cliques joined by triangles; use "
                          "threshold=0 and min_clique_size <= 4 so that every clique has 4 vertices")
+    p = S.shape[0]
+    n_edges = len({(a, b) for q in cliques for a in q for b in q if a < b})
+    if n_edges != 3 * p - 6:       # a planar 3-tree (Apollonian network) is maximally planar
+        raise ValueError("DBHT requires a maximally planar backbone (3p - 6 edges)")
     Rpm = _convert_cliques_to_adjacency(cliques, S)
     if not _is_connected(Rpm):
         raise ValueError(

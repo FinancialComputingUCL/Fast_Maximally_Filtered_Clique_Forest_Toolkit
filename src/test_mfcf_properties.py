@@ -1209,3 +1209,21 @@ def test_mutual_information_input_conventions():
     assert a.shape == (3, 3)
     with pytest.raises(ValueError, match="per bin"):
         mutual_information_matrix(X[:2], estimator="histogram")
+
+
+@pytest.mark.parametrize("gain", ["sum", "sumsquares", "loglik"])
+@pytest.mark.parametrize("seed_rule", ["strongest", "tmfg"])
+def test_tmfg_equivalent_backbone_is_maximally_planar(gain, seed_rule):
+    """max_clique_size=4, coordination_number=1, threshold 0: a planar 3-tree
+    (Apollonian network), i.e. maximally planar with 3p - 6 edges, as DBHT needs."""
+    for seed in range(8):
+        rng = np.random.default_rng(seed)
+        p = int(rng.integers(4, 50))
+        X = rng.standard_normal((300, 3)) @ rng.standard_normal((3, p)) + rng.standard_normal((300, p))
+        R = np.corrcoef(X, rowvar=False)
+        S = (1 + R) / 2
+        cl = MFCF(gain_function_type=gain, max_clique_size=4, coordination_number=1,
+                  seed=seed_rule, n_starts=1).run(S)[0]
+        G = nx.Graph(); G.add_nodes_from(range(p))
+        G.add_edges_from((a, b) for q in cl for a in q for b in q if a < b)
+        assert nx.check_planarity(G)[0] and G.number_of_edges() == 3 * p - 6

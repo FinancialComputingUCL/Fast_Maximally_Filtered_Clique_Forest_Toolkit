@@ -5,7 +5,7 @@ Accelerated Maximally Filtered Clique Forest (MFCF) implementations for sparse p
 ## Introduction
 - Build MFCF backbones from dense similarity matrices in a few seconds.
 - Drop-in graphical-model estimators (`MFCFLoGo`, `MFCFLoGoCV`, `MFCFLoGoCVAll`) that follow the scikit-learn API and offer a faster, more accurate alternative to Graphical Lasso when the sample-to-feature ratio is small.
-- Run Riskfolio-Lib’s Direct Bubble Hierarchical Tree (DBHT) clustering on a planar MFCF backbone of 4-cliques joined by triangles (the TMFG class, with a choice of gain) (`mfcf_dbht`).
+- Run Riskfolio-Lib’s Direct Bubble Hierarchical Tree (DBHT) clustering on the maximally planar MFCF backbone, the MFCF equivalent of the TMFG (`mfcf_dbht`).
 - Gaussian log-likelihood gain with statistical validation (F-test, BIC), several starts, and decomposable maximum-likelihood precision built directly from data (`MFCF.fit`).
 - Dependence beyond correlation: rank (Spearman, Kendall) and mutual-information (KSG, histogram) similarities (`mutual_information`).
 - One package for all earlier lines of development: the original `fast_fast_mfcf`, the toolkit `main` branch and the `mutual_info` branch (see *Compatibility with earlier versions*).
@@ -295,10 +295,12 @@ best_params = tuned.estimator_
 The backbone is built on a non-negative similarity `S` (checked) with the
 `"sum"` gain (default); for a correlation matrix `R` use, for instance,
 `S = (1 + R) / 2`, which is also a valid input for `"loglik"` and
-`"sumsquares"`. The DBHT steps assume 4-cliques joined by triangles (the TMFG
-class), so `max_clique_size` must be 4, `coordination_number` 1 (the
-default: each triangle joins at most two cliques, a planar TMFG-type graph)
-and every vertex attached (threshold 0). Other backbones raise an error.
+`"sumsquares"`. DBHT is defined for maximally planar graphs (the TMFG). The
+MFCF equivalent has 4-cliques joined by triangles, each triangle used at most
+once, and every vertex attached: `max_clique_size=4`, `coordination_number=1`
+(the default) and threshold 0. This is a planar 3-tree (Apollonian network),
+maximally planar with 3p - 6 edges (checked); other backbones raise an error.
+It is a TMFG-type graph, not in general the same graph as riskfolio's TMFG.
 
 ```python
 import numpy as np
