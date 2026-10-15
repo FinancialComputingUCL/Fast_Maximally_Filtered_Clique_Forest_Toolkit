@@ -1003,6 +1003,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             # a configuration with any failed fold is not eligible
             return float(scores.mean()) if np.all(np.isfinite(scores)) else float("nan")
 
+        self._trials = []
         if not self.n_trials or not self.tunable_params:      # no tuning: fixed parameters
             best_params = {}
         else:
@@ -1015,6 +1016,9 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
                                  "than the training folds support); use shrinkage > 0, fewer "
                                  "tunable clique sizes or more observations")
             best_params = study.best_params
+            self._trials = [dict(params=dict(t.params),
+                                 mean_test_score=(float(t.value) if t.value is not None else np.nan),
+                                 state=t.state.name) for t in study.trials]
         final_params = dict(
             threshold=self.threshold,
             min_clique_size=self.min_clique_size,
@@ -1078,6 +1082,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
 
         _check_configuration(self, X.shape[0], self.max_clique_size)
         best_params = self._cross_validate(X)
+        self.cv_results_ = list(self._trials)          # one record per Optuna trial
         self.best_params_ = {k: v for k, v in best_params.items()
                              if k in (self.tunable_params or ()) and self.n_trials}
 

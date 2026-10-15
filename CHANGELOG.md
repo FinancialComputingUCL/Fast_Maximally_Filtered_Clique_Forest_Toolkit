@@ -27,7 +27,7 @@ other weight matrices are no longer accepted; use `"sum"` on non-negative
 weights.
 
 ### Added
-- Merge of the `mutual_info` branch: `mutual_information` module (KSG and
+- Merge of the `mutual_info` branch (experimental): `mutual_information` module (KSG and
   histogram estimators, Linfoot normalisation; A. Briola) and the
   `similarity` / `mi_*` options of `MFCFLoGo`, with its `fit(X, corr_matrix,
   mi_matrix, cov_matrix)` interface; `MFCF.fit(X, similarity=
@@ -50,7 +50,13 @@ weights.
   `max_clique_size` starts for the `"loglik"` gain (better fit to new data
   and better network recovery, at K times the cost), one start for the
   weight gains.
-- `alpha` can be tuned by `MFCFLoGoCVAll`.
+- `alpha` can be tuned by `MFCFLoGoCVAll`, which records its trials in
+  `cv_results_` and the tuned values in `best_params_`.
+- Reference check of the cross-validated estimators
+  (`src/test_mfcf_cv_reference.py`): fold scores, selection and refit of
+  `MFCFLoGoCV` and `MFCFLoGoCVAll` equal an independent re-implementation
+  exactly, across gains, acceptance rules, shrinkage, rank correlations,
+  `n_effective`, `n_starts`, shuffling and failing folds.
 - Installable package (`pyproject.toml`; core needs only numpy and scipy,
   optuna is imported only by `MFCFLoGoCVAll`); input validation with
   informative errors; version number;

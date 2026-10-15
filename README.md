@@ -155,7 +155,7 @@ m.n_effective_                            # observations used by the test
 - `fit(X)` works with the `"loglik"` gain (default) or `"sumsquares"` (the
   original construction on the correlation matrix); for other weight
   matrices use `run(C)`.
-- `similarity="mutual_information"` builds the structure on the pairwise
+- *Experimental:* `similarity="mutual_information"` builds the structure on the pairwise
   mutual information in Linfoot's normalisation `sqrt(1 - exp(-2 I))`, which
   captures non-linear and tail dependence (for Gaussian data it estimates
   `|rho|`). Estimators: `mi_estimator="ksg"` (k-nearest neighbours, default;

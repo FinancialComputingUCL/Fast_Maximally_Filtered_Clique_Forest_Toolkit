@@ -1,5 +1,5 @@
 """
-Mutual-information similarity matrix for MFCF.
+Mutual-information similarity matrix for MFCF (experimental).
 
 Pearson correlation is the natural similarity when the variables are jointly
 Gaussian.  Outside that regime — fat tails, regime shifts, non-linear
