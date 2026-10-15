@@ -5,7 +5,7 @@ Accelerated Maximally Filtered Clique Forest (MFCF) implementations for sparse p
 ## Introduction
 - Build MFCF backbones from dense similarity matrices in a few seconds.
 - Drop-in graphical-model estimators (`MFCFLoGo`, `MFCFLoGoCV`, `MFCFLoGoCVAll`) that follow the scikit-learn API and offer a faster, more accurate alternative to Graphical Lasso when the sample-to-feature ratio is small.
-- Extend Riskfolio-Lib’s Direct Bubble Hierarchical Tree (DBHT) pipeline so it can operate over any MFCF backbone instead of only TMFG graphs (`mfcf_dbht`).
+- Run Riskfolio-Lib’s Direct Bubble Hierarchical Tree (DBHT) clustering on an MFCF backbone of 4-cliques joined by triangles (the TMFG class, with a choice of gain and coordination cap) (`mfcf_dbht`).
 - Gaussian log-likelihood gain with statistical validation (F-test, BIC), several starts, and decomposable maximum-likelihood precision built directly from data (`MFCF.fit`).
 - Dependence beyond correlation: rank (Spearman, Kendall) and mutual-information (KSG, histogram) similarities (`mutual_information`).
 - One package for all earlier lines of development: the original `fast_fast_mfcf`, the toolkit `main` branch and the `mutual_info` branch (see *Compatibility with earlier versions*).
@@ -99,8 +99,10 @@ With `"sumsquares"` and `"sum"`, `threshold` applies to each `C[v,u]^2` or
 `C[v,u]`, exactly as in earlier versions. `"loglik"` and `"sumsquares"` check
 that `C` is a valid covariance or correlation matrix (signed entries allowed);
 `"sum"` checks that the weights are non-negative. Each raises an error
-otherwise. For a weight matrix, `run()` returns `None` for the LoGo matrix
-unless `cov_matrix` is given.
+otherwise. `run()` assembles the LoGo matrix from `cov_matrix` if given, else
+from `C` itself; for a weight matrix that is rarely meaningful (and it is
+`None` when the blocks of `C` are singular), so pass a covariance as
+`cov_matrix` to obtain a precision.
 
 ```python
 import numpy as np
@@ -146,8 +148,8 @@ m.n_effective_                            # observations used by the test
   transformations of the variables and robust to heavy tails and outliers
   (e.g. daily returns); the statistical tests hold approximately. Spearman
   costs about the same as Pearson and is the choice for long series; Kendall
-  costs O(p^2 n log n) (about 4 s for p = 50, n = 20000; 0.03 s with
-  Spearman).
+  costs O(p^2 n log n) (a few seconds for p = 50, n = 20000; well under a
+  second with Spearman).
 - Assumptions: approximately stationary series over the sample (use returns,
   not prices). Data preparation (missing values, windows) is left to the user.
 - `fit(X)` works with the `"loglik"` gain (default) or `"sumsquares"` (the
@@ -290,7 +292,10 @@ best_params = tuned.estimator_
 The backbone is built on a non-negative similarity `S` (checked) with the
 `"sum"` gain (default); for a correlation matrix `R` use, for instance,
 `S = (1 + R) / 2`, which is also a valid input for `"loglik"` and
-`"sumsquares"`.
+`"sumsquares"`. The DBHT steps assume 4-cliques joined by triangles (the TMFG
+class), so `max_clique_size` must be 4 and every vertex attached (threshold
+0); `coordination_number=1` gives the planar TMFG-type graph. Other backbones
+raise an error.
 
 ```python
 import numpy as np
@@ -303,6 +308,6 @@ D = np.sqrt(np.clip(2 * (1 - R), 0, None))       # distance between features
 np.fill_diagonal(D, 0.0)
 S = (1 + R) / 2                                  # non-negative similarity, 1 - D**2 / 4
 
-T8, Rpm, Adjv, Dpm, Mv, Z = mfcf_dbhts(D, S, min_clique_size=2, max_clique_size=6)
+T8, Rpm, Adjv, Dpm, Mv, Z = mfcf_dbhts(D, S, max_clique_size=4)
 labels = fcluster(Z, t=4, criterion="maxclust")  # e.g. four clusters
 ```

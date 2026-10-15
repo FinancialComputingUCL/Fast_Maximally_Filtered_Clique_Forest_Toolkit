@@ -54,7 +54,7 @@ weights.
 - Installable package (`pyproject.toml`; core needs only numpy and scipy,
   optuna is imported only by `MFCFLoGoCVAll`); input validation with
   informative errors; version number;
-  scaling benchmark (`benchmarks/`); about 2150 tests (validation against the
+  scaling benchmark (`benchmarks/`); about 2400 tests (validation against the
   reference implementation, properties, robustness, scikit-learn checks).
 
 ### Fixed
@@ -92,11 +92,26 @@ weights.
   freedom for the mean with `assume_centered=True`; `run()` accepts any
   array-like; `"sum"` rejects non-finite or asymmetric weights; DBHT rejects
   a signed similarity.
-- `MFCFLoGoCV` never selects a clique size whose folds failed; it raises if
-  all failed.
+- `MFCFLoGoCV` never selects a clique size whose folds failed (also with a
+  finite `error_score`); it raises if all failed. A grid may be any iterable.
+- `MFCFLoGoCVAll`: `n_trials=0`/`None` refits with the fixed parameters (as
+  documented); `random_state` also seeds the Optuna sampler (reproducible
+  search); `error_score` is honoured; unknown `tunable_params` raise; the
+  clique-size range reaches `n_features`.
+- A numeric `n_effective` in the cross-validated estimators refers to the full
+  sample and is scaled to each training fold.
+- `n_effective="auto"` uses autocorrelations about the sample mean (also with
+  `assume_centered=True`); with shrinkage, starts are compared on the shrunk
+  model.
+- `mfcf_dbht` requires the backbone its DBHT steps assume (4-cliques joined by
+  triangles, `max_clique_size=4`) and raises otherwise; earlier claims that it
+  ran on any MFCF backbone were wrong (other sizes collapsed to one cluster
+  or crashed).
 - Mutual information: the KSG estimate is computed on standardised columns
-  (it depended on the units of the variables, and the numba backend now
-  agrees with the sklearn backend); tied values share a histogram bin
+  (it depended on the units of the variables; the numba and sklearn backends
+  now agree up to neighbour counts at exact distance ties, about 1e-3 nats);
+  `n_neighbors` is validated (0 crashed the interpreter); scikit-learn is
+  needed only by the sklearn KSG backend; tied values share a histogram bin
   (independent discrete variables looked dependent) and the Miller-Madow
   correction counts the occupied bins; NaN inputs are
   rejected; the default jitter is reproducible.
@@ -117,4 +132,5 @@ weights.
   an eigendecomposition (about 10x faster for large p).
 - The log-likelihood gain is cached per separator (bounded memory) and uses
   closed-form facet updates; it runs at a cost comparable to the
-  sum-of-squares gain (p = 1600, K = 8: about 4 s).
+  sum-of-squares gain (p = 1600, K = 8, one start: a few seconds; the
+  default `n_starts = max_clique_size` multiplies this by K).

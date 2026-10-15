@@ -73,7 +73,6 @@ import inspect
 from typing import Literal, Optional
 
 import numpy as np
-from sklearn.feature_selection import mutual_info_regression
 
 
 _NormalizeKind = Literal["linfoot", "none"]
@@ -92,10 +91,15 @@ _GAMMA_E = 0.5772156649015329
 _MAX_AUTO_BINS = 12
 
 
-# sklearn 1.5 added ``n_jobs`` to mutual_info_regression; tolerate older releases.
-_MI_SUPPORTS_NJOBS = (
-    "n_jobs" in inspect.signature(mutual_info_regression).parameters
-)
+def _sklearn_mi():
+    """sklearn's KSG estimator, imported only when needed (the histogram
+    estimator and the numba KSG backend do not need scikit-learn)."""
+    try:
+        from sklearn.feature_selection import mutual_info_regression
+    except ImportError as e:  # pragma: no cover - depends on the environment
+        raise ImportError("the sklearn KSG backend needs scikit-learn "
+                          "(pip install scikit-learn), or install numba") from e
+    return mutual_info_regression
 
 
 try:
@@ -365,6 +369,7 @@ def _ksg_matrix_sklearn(
     M = np.zeros((n_features, n_features), dtype=np.float64)
     if n_features < 2:
         return M
+    mutual_info_regression = _sklearn_mi()
 
     mi_kwargs = dict(
         discrete_features=False,
@@ -372,7 +377,7 @@ def _ksg_matrix_sklearn(
         copy=False,
         random_state=random_state,
     )
-    if _MI_SUPPORTS_NJOBS:
+    if "n_jobs" in inspect.signature(mutual_info_regression).parameters:   # sklearn >= 1.5
         mi_kwargs["n_jobs"] = n_jobs
 
     for j in range(1, n_features):
@@ -662,7 +667,7 @@ def _histogram_raw_matrix(
         try:
             if n_jobs is not None and n_jobs > 0:
                 _orig = numba.get_num_threads()
-                numba.set_num_threads(int(n_jobs))
+                numba.set_num_threads(min(int(n_jobs), numba.config.NUMBA_NUM_THREADS))
                 try:
                     _histogram_mi_matrix_numba(
                         codes, int(n_bins), int(n_features), log_table, log_n, M
@@ -751,7 +756,7 @@ def _ksg_raw_matrix(
 
             if n_jobs is not None and n_jobs > 0:
                 _orig = numba.get_num_threads()
-                numba.set_num_threads(int(n_jobs))
+                numba.set_num_threads(min(int(n_jobs), numba.config.NUMBA_NUM_THREADS))
                 try:
                     _ksg_matrix_numba(
                         XT, sorted_cols, argsort_cols, ranks_cols,
@@ -865,6 +870,12 @@ def mutual_information_matrix(
         raise ValueError(f"X must be 2-D, got shape {X.shape}.")
     if not np.all(np.isfinite(X)):
         raise ValueError("X contains NaN or infinite values.")
+    if estimator == "ksg":
+        if (isinstance(n_neighbors, bool) or not isinstance(n_neighbors, (int, np.integer))
+                or n_neighbors < 1):
+            raise ValueError(f"n_neighbors must be an integer >= 1, got {n_neighbors!r}.")
+    if n_jobs is not None and (isinstance(n_jobs, bool) or not isinstance(n_jobs, (int, np.integer))):
+        raise ValueError(f"n_jobs must be an integer or None, got {n_jobs!r}.")
     if random_state is None:
         random_state = 0      # reproducible tie-breaking jitter by default
 

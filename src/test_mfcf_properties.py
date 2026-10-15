@@ -1006,3 +1006,127 @@ def test_cv_never_selects_a_failed_grid_value():
         cv = MFCFLoGoCV(gain_function_type="loglik", max_clique_size_grid=[2, 3, 4, 6, 8, 9], cv=3).fit(X)
     means = cv.cv_results_["mean_test_score"]
     assert np.isfinite(means[list(cv.cv_results_["params"]).index({"max_clique_size": cv.best_max_clique_size_})])
+
+
+# ------------------------ regressions from the third review pass (Oct 2026)
+def _blocks_data(p_block=10, k=2, n=300, seed=0):
+    rng = np.random.default_rng(seed)
+    g = np.repeat(np.arange(k), p_block)
+    X = rng.standard_normal((n, k))[:, g] + 0.8 * rng.standard_normal((n, k * p_block))
+    return X, g
+
+
+@pytest.mark.parametrize("kw", [dict(), dict(coordination_number=1), dict(gain_function_type="loglik"),
+                                dict(gain_function_type="sumsquares")])
+def test_dbht_recovers_blocks_with_tmfg_type_backbones(kw):
+    pytest.importorskip("riskfolio")
+    from mfcf_dbht import mfcf_dbhts
+    X, g = _blocks_data(k=4)
+    R = np.corrcoef(X, rowvar=False)
+    D = np.sqrt(np.clip(2 * (1 - R), 0, None)); np.fill_diagonal(D, 0)
+    T8 = mfcf_dbhts(D, (1 + R) / 2, max_clique_size=4, **kw)[0]
+    labels = {}
+    assert all(labels.setdefault(int(gi), t) == t for gi, t in zip(g, T8))   # blocks not split
+    assert len(set(T8)) >= 4                                                  # blocks not merged
+
+
+@pytest.mark.parametrize("kw", [dict(max_clique_size=5), dict(max_clique_size=6, min_clique_size=2),
+                                dict(max_clique_size=3), dict(max_clique_size=4, threshold=0.6)])
+def test_dbht_rejects_other_backbones(kw):
+    pytest.importorskip("riskfolio")
+    from mfcf_dbht import mfcf_dbhts
+    X, g = _blocks_data(k=4)
+    R = np.corrcoef(X, rowvar=False)
+    D = np.sqrt(np.clip(2 * (1 - R), 0, None)); np.fill_diagonal(D, 0)
+    with pytest.raises(ValueError):
+        mfcf_dbhts(D, (1 + R) / 2, **kw)
+
+
+@pytest.mark.parametrize("bad", [0, -1, 2.7, True])
+def test_mutual_information_rejects_bad_n_neighbors(bad):
+    from mutual_information import mutual_information_matrix
+    X = np.random.default_rng(0).standard_normal((100, 3))
+    with pytest.raises(ValueError, match="n_neighbors"):
+        mutual_information_matrix(X, n_neighbors=bad)
+
+
+def test_mutual_information_without_sklearn(monkeypatch):
+    """The histogram estimator (and the numba KSG) work without scikit-learn."""
+    import builtins
+    import importlib
+    import mutual_information
+    real_import = builtins.__import__
+    def no_sklearn(name, *a, **k):
+        if name == "sklearn" or name.startswith("sklearn."):
+            raise ImportError("no sklearn")
+        return real_import(name, *a, **k)
+    monkeypatch.setattr(builtins, "__import__", no_sklearn)
+    mi = importlib.reload(mutual_information)
+    X = np.random.default_rng(1).standard_normal((200, 4))
+    assert mi.mutual_information_matrix(X, estimator="histogram").shape == (4, 4)
+    monkeypatch.setattr(builtins, "__import__", real_import)
+    importlib.reload(mutual_information)
+
+
+@pytest.mark.parametrize("n_trials", [0, None])
+def test_cvall_without_tuning(n_trials):
+    pytest.importorskip("optuna")
+    from mfcf_logo import MFCFLoGoCVAll, MFCFLoGo
+    X = np.random.default_rng(2).standard_normal((120, 8))
+    a = MFCFLoGoCVAll(gain_function_type="loglik", n_trials=n_trials, max_clique_size=3).fit(X)
+    b = MFCFLoGo(gain_function_type="loglik", max_clique_size=3).fit(X)
+    np.testing.assert_allclose(a.precision_, b.precision_)
+
+
+def test_cvall_reproducible_with_random_state():
+    pytest.importorskip("optuna")
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    from mfcf_logo import MFCFLoGoCVAll
+    X = np.random.default_rng(3).standard_normal((150, 8)) @ np.random.default_rng(4).standard_normal((8, 8))
+    kw = dict(gain_function_type="loglik", tunable_params=("threshold", "max_clique_size"), n_trials=6,
+              cv=3, shuffle=True, random_state=7)
+    a = MFCFLoGoCVAll(**kw).fit(X).estimator_.get_params()
+    b = MFCFLoGoCVAll(**kw).fit(X).estimator_.get_params()
+    assert (a["threshold"], a["max_clique_size"]) == (b["threshold"], b["max_clique_size"])
+    with pytest.raises(ValueError, match="tunable"):
+        MFCFLoGoCVAll(gain_function_type="loglik", tunable_params=("shrinkage",), n_trials=2).fit(X)
+
+
+def test_cv_finite_error_score_never_selects_failed_size():
+    from mfcf_logo import MFCFLoGoCV
+    import warnings
+    X = np.random.default_rng(5).standard_normal((12, 10))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        cv = MFCFLoGoCV(gain_function_type="loglik", max_clique_size_grid=[2, 3, 10], cv=3,
+                        error_score=0.0).fit(X)
+    assert cv.best_max_clique_size_ in (2, 3)
+    cv2 = MFCFLoGoCV(gain_function_type="loglik", max_clique_size_grid=(k for k in (2, 3)), cv=3).fit(
+        np.random.default_rng(6).standard_normal((60, 6)))
+    assert cv2.best_max_clique_size_ in (2, 3)
+
+
+def test_cv_numeric_n_effective_is_scaled_to_folds():
+    from mfcf_logo import MFCFLoGoCV
+    X = np.random.default_rng(7).standard_normal((100, 6))
+    cv = MFCFLoGoCV(gain_function_type="loglik", acceptance="ftest", n_effective=90,
+                    max_clique_size_grid=[2, 3], cv=5).fit(X)
+    assert all(r.success for r in cv.fold_scores_)
+
+
+def test_n_effective_auto_with_assume_centered():
+    rng = np.random.default_rng(8)
+    X = 100 + rng.standard_normal((1000, 4))                      # white noise, mean 100
+    m = MFCF(gain_function_type="loglik", acceptance="ftest").fit(X, n_effective="auto",
+                                                                    assume_centered=True)
+    assert m.n_effective_ > 800
+
+
+def test_raw_mutual_information_needs_the_sum_gain():
+    X = np.random.default_rng(9).standard_normal((200, 5))
+    with pytest.raises(ValueError, match="mi_normalize"):
+        MFCF(gain_function_type="sumsquares").fit(X, similarity="mutual_information",
+                                                  mi_estimator="histogram", mi_normalize="none")
+    MFCF(gain_function_type="sum").fit(X, similarity="mutual_information",
+                                       mi_estimator="histogram", mi_normalize="none")

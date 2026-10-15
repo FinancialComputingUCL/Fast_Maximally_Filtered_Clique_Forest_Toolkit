@@ -555,6 +555,7 @@ def _effective_sample_size(Xc: np.ndarray) -> float:
     (1 - phi_i phi_j)``, with ``phi`` the lag-1 autocorrelations, clipped to
     [-0.99, 0.99]; never larger than n."""
     n, p = Xc.shape
+    Xc = Xc - Xc.mean(axis=0)          # autocorrelations about the sample mean
     num = np.sum(Xc[1:] * Xc[:-1], axis=0)
     den = np.sum(Xc * Xc, axis=0)
     phi = np.clip(num / den, -0.99, 0.99)
@@ -1372,8 +1373,10 @@ class MFCF:
         return seeds
 
     def _objective(self) -> float:
-        """Objective of the current clique forest, used to compare starts."""
-        C = np.asarray(self._C, dtype=float)
+        """Objective of the current clique forest, used to compare starts
+        (for fit with shrinkage: the likelihood of the shrunk model)."""
+        C = np.asarray(getattr(self, "_objective_matrix", None)
+                       if getattr(self, "_objective_matrix", None) is not None else self._C, dtype=float)
         if self._gf_type == "loglik":
             def ld(q):
                 q = sorted(q)
@@ -1860,6 +1863,9 @@ class MFCF:
                 raise ValueError(
                     "similarity='mutual_information' needs gain_function_type='sumsquares' "
                     "or 'sum' (the information matrix is not a covariance)")
+            if self._gf_type == "sumsquares" and mi_normalize != "linfoot":
+                raise ValueError("raw mutual information (mi_normalize='none') is not a correlation "
+                                 "coefficient: use gain_function_type='sum' or mi_normalize='linfoot'")
             if mi_matrix is not None:
                 S = np.asarray(mi_matrix, dtype=float)
                 if S.shape != (p, p):
@@ -1878,8 +1884,11 @@ class MFCF:
             self._n_samples = n_eff + (1.0 if assume_centered and self._acceptance == "ftest" else 0.0)
         try:
             R_shrunk = (1 - shrinkage) * R + shrinkage * np.eye(p)
+            if self._gf_type == "loglik" and shrinkage > 0:
+                self._objective_matrix = R_shrunk      # starts compared on the shrunk model
             cliques, seps, peo, J = self.run(C=S, cov_matrix=R_shrunk)
         finally:
+            self._objective_matrix = None
             self._n_samples = saved
             if restore is not None:   # the switch applies to this fit only
                 self._gf_type, self._gain_unset, self._n_starts = restore

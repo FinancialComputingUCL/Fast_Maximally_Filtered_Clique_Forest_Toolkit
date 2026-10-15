@@ -3,9 +3,12 @@ Tools for performing Direct Bubble Hierarchical Tree (DBHT) clustering
 using a Maximally Filtered Clique Forest (MFCF) backbone.
 
 This module replaces the TMFG graph-construction step in the original
-riskfolio DBHT implementation with an MFCF-based builder, improving
-flexibility via tunable clique sizes, a gain threshold, and an optional
-cap on separator reuse.
+riskfolio DBHT implementation with an MFCF-based builder. The DBHT steps of
+riskfolio assume a backbone of 4-cliques joined by triangles (as in the
+TMFG), so the MFCF must be built with ``max_clique_size=4`` and every vertex
+attached (threshold 0); other backbones are rejected with an error. Within
+that class the gain and the coordination cap can be chosen (e.g.
+``coordination_number=1`` gives the planar TMFG-type graph).
 
 Functions
 ---------
@@ -81,7 +84,7 @@ def mfcf_dbhts(
         Minimum clique size allowed in the MFCF graph.
 
     max_clique_size : int, default=4
-        Maximum clique size allowed in the MFCF graph.
+        Must be 4: the DBHT steps require 4-cliques joined by triangles.
 
     coordination_number : float, default=np.inf
         Maximum allowed uses of a separator (multiplicity cap) during MFCF.
@@ -137,7 +140,14 @@ def mfcf_dbhts(
         n_starts=n_starts,
         n_samples=n_samples,
     )
-    cliques, _, _, _ = builder.run(C=S, cov_matrix=np.eye(S.shape[0]))
+    if max_clique_size != 4:
+        raise ValueError("DBHT requires max_clique_size=4 (a backbone of 4-cliques joined by "
+                         "triangles, as in the TMFG)")
+    cliques, seps, _, _ = builder.run(C=S, cov_matrix=np.eye(S.shape[0]))
+    if S.shape[0] >= 4 and (any(len(q) != 4 for q in cliques)
+                            or any(len(sp) != 3 for sp in seps if len(sp))):
+        raise ValueError("DBHT requires a backbone of 4-cliques joined by triangles; use "
+                         "threshold=0 and min_clique_size <= 4 so that every clique has 4 vertices")
     Rpm = _convert_cliques_to_adjacency(cliques, S)
     if not _is_connected(Rpm):
         raise ValueError(

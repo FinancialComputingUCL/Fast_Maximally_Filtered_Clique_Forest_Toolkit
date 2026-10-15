@@ -7,9 +7,16 @@ import numpy.linalg as LA
 from sklearn.covariance import EmpiricalCovariance
 from sklearn.covariance import empirical_covariance, log_likelihood
 from sklearn.model_selection import KFold, cross_val_score
-from sklearn.utils.validation import check_array, check_is_fitted, _is_arraylike
+from sklearn.utils.validation import check_array, check_is_fitted
 
 from fast_fast_mfcf import MFCF as _MFCFBuilder
+
+
+def _fold_n_effective(n_effective, n_train: int, n_total: int):
+    """A numeric n_effective refers to the full sample: scale it to a fold."""
+    if n_effective is None or isinstance(n_effective, str):
+        return n_effective
+    return max(3.0, float(n_effective) * n_train / n_total)
 
 
 class MFCFLoGo(EmpiricalCovariance):
@@ -472,8 +479,8 @@ class MFCFLoGoCV(EmpiricalCovariance):
 
     # ------------------------------ utils ------------------------------
     def _iter_grid(self, n_features: int) -> List[int]:
-        if _is_arraylike(self.max_clique_size_grid):
-            grid = list({int(k) for k in self.max_clique_size_grid})
+        if not isinstance(self.max_clique_size_grid, (int, np.integer)):
+            grid = sorted({int(k) for k in self.max_clique_size_grid})
         else:
             lower = max(2, int(self.min_clique_size))
             upper = min(self.max_clique_size_grid, int(n_features))
@@ -547,7 +554,7 @@ class MFCFLoGoCV(EmpiricalCovariance):
                         new_component=self.new_component,
                         n_starts=None if self.n_starts is None else min(self.n_starts, k),
                         shrinkage=self.shrinkage,
-                        n_effective=self.n_effective,
+                        n_effective=_fold_n_effective(self.n_effective, len(tr), X.shape[0]),
                         correlation=self.correlation,
                         similarity=self.similarity,
                         mi_estimator=self.mi_estimator,
@@ -594,12 +601,15 @@ class MFCFLoGoCV(EmpiricalCovariance):
             dtype=float,
         )
 
-        # pick the best k (tie-breaker: larger k if equal mean? choose argmax, then prefer smaller std)
-        if not np.any(np.isfinite(means)):
+        # pick the best k among the grid values whose folds all succeeded
+        # (a finite error_score must not make a failed value look best)
+        ok = np.array([all(r.success for r in fold_records if r.max_clique_size == k) for k in grid])
+        ok &= np.isfinite(means)
+        if not ok.any():
             raise ValueError("Every max_clique_size in the grid failed in cross-validation "
                              "(e.g. fewer training observations than the clique size); "
                              "use shrinkage > 0 or smaller clique sizes")
-        best_idx = int(np.nanargmax(np.where(np.isfinite(means), means, np.nan)))
+        best_idx = int(np.argmax(np.where(ok, means, -np.inf)))
         best_k = int(grid[best_idx])
 
         # Store CV artifacts
@@ -696,7 +706,8 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         Whether to shuffle samples before splitting.
 
     random_state : Optional[int], default=None
-        Random state for the KFold when shuffle=True.
+        Random state for the KFold when shuffle=True and seed of the Optuna
+        sampler (reproducible search).
 
     # Scoring / stability
     assume_centered : bool, default=False
@@ -883,6 +894,11 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         )
         if not self.tunable_params:
             return params
+        unknown = set(self.tunable_params) - {"alpha", "threshold", "max_clique_size",
+                                               "min_clique_size", "coordination_number"}
+        if unknown:
+            raise ValueError(f"Unknown tunable_params: {sorted(unknown)}; choose from 'alpha', "
+                             "'threshold', 'max_clique_size', 'min_clique_size', 'coordination_number'")
 
         if "alpha" in self.tunable_params:
             params["alpha"] = trial.suggest_float("alpha", 1e-4, 0.5, log=True)
@@ -895,7 +911,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             and "min_clique_size" in self.tunable_params
         ):
             params["max_clique_size"] = trial.suggest_int(
-                "max_clique_size", 2, max(2, min(32, n_features - 1)), log=True
+                "max_clique_size", 2, max(2, min(32, n_features)), log=True
             )
             params["min_clique_size"] = trial.suggest_int(
                 "min_clique_size", 1, params["max_clique_size"], log=True
@@ -909,7 +925,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             # Only tune max_clique_size, fixed min_clique_size
             lo = max(2, int(self.min_clique_size))
             params["max_clique_size"] = trial.suggest_int(
-                "max_clique_size", lo, max(lo, min(32, n_features - 1)), log=True
+                "max_clique_size", lo, max(lo, min(32, n_features)), log=True
             )
 
         if "coordination_number" in self.tunable_params:
@@ -936,19 +952,25 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             # )
             if params["n_starts"] is not None:
                 params["n_starts"] = min(params["n_starts"], params["max_clique_size"])
+            n = X.shape[0]
+            params["n_effective"] = _fold_n_effective(params["n_effective"], n - -(-n // self.cv), n)
             est = MFCFLoGo(**params, assume_centered=self.assume_centered)
 
             cv = KFold(n_splits=self.cv, shuffle=self.shuffle,
                        random_state=self.random_state if self.shuffle else None)
             scores = cross_val_score(
-                est, X, y=None, scoring=log_likelihood_scorer, cv=cv, n_jobs=self.n_jobs
+                est, X, y=None, scoring=log_likelihood_scorer, cv=cv, n_jobs=self.n_jobs,
+                error_score=self.error_score,
             )
             return scores.mean()
 
-        study = optuna.create_study(direction="maximize")
-        study.optimize(objective, n_trials=self.n_trials)
-
-        best_params = study.best_params
+        if not self.n_trials or not self.tunable_params:      # no tuning: fixed parameters
+            best_params = {}
+        else:
+            sampler = optuna.samplers.TPESampler(seed=self.random_state)  # reproducible search
+            study = optuna.create_study(direction="maximize", sampler=sampler)
+            study.optimize(objective, n_trials=int(self.n_trials))
+            best_params = study.best_params
         final_params = dict(
             threshold=self.threshold,
             min_clique_size=self.min_clique_size,

@@ -245,7 +245,7 @@ def test_dbht_rejects_disconnected_graph():
     R = np.corrcoef(rng.standard_normal((300, 12)), rowvar=False)   # independent noise
     D = np.sqrt(np.clip(2 * (1 - R), 0, None)); np.fill_diagonal(D, 0.0)
     S = R ** 2                                                       # weak similarities
-    with pytest.raises(ValueError, match="connected"):
+    with pytest.raises(ValueError, match="connected|4-cliques"):
         mfcf_dbhts(D, S, threshold=0.5, max_clique_size=4, gain_function_type="sum")
 
 
