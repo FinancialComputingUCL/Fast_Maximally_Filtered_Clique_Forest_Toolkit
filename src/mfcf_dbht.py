@@ -3,9 +3,14 @@ Tools for performing Direct Bubble Hierarchical Tree (DBHT) clustering
 using a Maximally Filtered Clique Forest (MFCF) backbone.
 
 This module replaces the TMFG graph-construction step in the original
-riskfolio DBHT implementation with an MFCF-based builder, improving
-flexibility via tunable clique sizes, a gain threshold, and an optional
-cap on separator reuse.
+riskfolio DBHT implementation with an MFCF-based builder. DBHT is defined
+for maximally planar graphs (the TMFG). The MFCF equivalent is built with
+4-cliques, triangle separators each used at most once and every vertex
+attached (``max_clique_size=4``, ``coordination_number=1``, threshold 0): a
+planar 3-tree (Apollonian network), hence maximally planar with 3p - 6 edges.
+Other backbones are rejected with an error. The gain and the seed can be
+chosen; the backbone is of the TMFG type but not, in general, the same graph
+as riskfolio's own TMFG, which inserts vertices by its own rule.
 
 Functions
 ---------
@@ -19,8 +24,11 @@ _convert_cliques_to_adjacency
     using weights from S.
 """
 
+from typing import Optional
+
 import numpy as np
 from scipy.cluster.hierarchy import optimal_leaf_ordering
+from scipy.spatial.distance import squareform
 from riskfolio import (
     distance_wei,
     CliqHierarchyTree2s,
@@ -38,7 +46,13 @@ def mfcf_dbhts(
     threshold: float = 0.0,
     min_clique_size: int = 1,
     max_clique_size: int = 4,
-    coordination_number: int = np.inf,
+    coordination_number: int = 1,
+    gain_function_type: str = "sum",
+    acceptance: str = "threshold",
+    alpha: float = 0.05,
+    new_component: str = "strongest",
+    n_starts: Optional[int] = None,
+    n_samples: int = None,
 ):
     """
     Perform Direct Bubble Hierarchical Tree (DBHT) clustering with an
@@ -72,10 +86,11 @@ def mfcf_dbhts(
         Minimum clique size allowed in the MFCF graph.
 
     max_clique_size : int, default=4
-        Maximum clique size allowed in the MFCF graph.
+        Must be 4: the DBHT steps require 4-cliques joined by triangles.
 
-    coordination_number : float, default=np.inf
-        Maximum allowed uses of a separator (multiplicity cap) during MFCF.
+    coordination_number : int, default=1
+        Must be 1: each triangle joins at most two 4-cliques, so the backbone
+        is planar (TMFG type), as the DBHT steps assume.
 
     Returns
     -------
@@ -103,7 +118,11 @@ def mfcf_dbhts(
     Raises
     ------
     ValueError
-        If ``D`` or ``S`` is not square or the shapes are inconsistent.
+        If ``D`` or ``S`` is not square, the shapes differ, they contain
+        non-finite values, ``D`` or ``S`` has negative off-diagonal entries,
+        there are fewer than 4 variables, or the backbone is not of the TMFG
+        type (``max_clique_size=4``, ``coordination_number=1``, every vertex
+        attached).
 
     Notes
     -----
@@ -112,14 +131,57 @@ def mfcf_dbhts(
       a flat clustering at a chosen number of clusters or distance threshold.
     """
 
+    S = np.asarray(S, dtype=float)
+    D = np.asarray(D, dtype=float)
+    if S.ndim != 2 or S.shape[0] != S.shape[1] or D.shape != S.shape:
+        raise ValueError("D and S must be square matrices of the same shape")
+    if S.shape[0] < 4:
+        raise ValueError("DBHT needs at least 4 variables")
+    if not (np.all(np.isfinite(S)) and np.all(np.isfinite(D))):
+        raise ValueError("D and S must be finite")
+    off = ~np.eye(S.shape[0], dtype=bool)
+    if np.any(S[off] < 0):
+        raise ValueError("DBHT needs a non-negative similarity S (e.g. (1 + R) / 2 for a "
+                         "correlation matrix R)")
+    if np.any(D[off] < 0):
+        raise ValueError("D must be a non-negative dissimilarity")
+    if coordination_number != 1:
+        raise ValueError("DBHT requires coordination_number=1 (a planar backbone of the TMFG "
+                         "type; other values give non-planar graphs that DBHT mishandles)")
     builder = _MFCFBuilder(
         threshold=threshold,
         min_clique_size=min_clique_size,
         max_clique_size=max_clique_size,
         coordination_number=coordination_number,
+        gain_function_type=gain_function_type,
+        acceptance=acceptance,
+        alpha=alpha,
+        new_component=new_component,
+        n_starts=n_starts,
+        n_samples=n_samples,
     )
-    cliques, _, _, _ = builder.run(C=S)
+    if max_clique_size != 4:
+        raise ValueError("DBHT requires max_clique_size=4 (a backbone of 4-cliques joined by "
+                         "triangles, as in the TMFG)")
+    cliques, seps, _, _ = builder.run(C=S, cov_matrix=np.eye(S.shape[0]))
+    if (any(len(q) != 4 for q in cliques)
+                            or any(len(sp) != 3 for sp in seps if len(sp))):
+        raise ValueError("DBHT requires a backbone of 4-cliques joined by triangles; use "
+                         "threshold=0 and min_clique_size <= 4 so that every clique has 4 vertices")
+    p = S.shape[0]
+    n_edges = len({(a, b) for q in cliques for a in q for b in q if a < b})
+    if n_edges != 3 * p - 6:       # a planar 3-tree (Apollonian network) is maximally planar
+        raise ValueError("DBHT requires a maximally planar backbone (3p - 6 edges)")
     Rpm = _convert_cliques_to_adjacency(cliques, S)
+    if np.count_nonzero(np.triu(Rpm, 1)) != 3 * p - 6:
+        raise ValueError("Some backbone edges have zero similarity, so the weighted graph is "
+                         "not maximally planar; use a strictly positive S, e.g. (1 + R) / 2")
+    if not _is_connected(Rpm):
+        raise ValueError(
+            "DBHT requires a connected MFCF graph, but the attachment rule left "
+            "isolated components; lower `threshold` (or use acceptance='threshold' "
+            "with threshold=0) so that every vertex is attached"
+        )
 
     Apm = Rpm.copy()
     Apm[Apm != 0] = D[Apm != 0].copy()
@@ -137,9 +199,26 @@ def mfcf_dbhts(
     Z = HierarchyConstruct4s(Rpm, Dpm, T8, Adjv, Mv)
 
     if leaf_order == True:
-        Z = optimal_leaf_ordering(Z, squareform(D))
+        # symmetrise: correlation-based distances are symmetric only up to rounding
+        Dsym = (np.asarray(D, dtype=float) + np.asarray(D, dtype=float).T) / 2
+        np.fill_diagonal(Dsym, 0.0)
+        Z = optimal_leaf_ordering(Z, squareform(Dsym))
 
     return (T8, Rpm, Adjv, Dpm, Mv, Z)
+
+
+def _is_connected(A) -> bool:
+    """True if the graph with adjacency pattern A (nonzero entries) is connected."""
+    n = A.shape[0]
+    seen = np.zeros(n, dtype=bool)
+    stack = [0]
+    seen[0] = True
+    while stack:
+        i = stack.pop()
+        for j in np.flatnonzero((A[i] != 0) & ~seen):
+            seen[j] = True
+            stack.append(j)
+    return bool(seen.all())
 
 
 def _convert_cliques_to_adjacency(cliques, S):

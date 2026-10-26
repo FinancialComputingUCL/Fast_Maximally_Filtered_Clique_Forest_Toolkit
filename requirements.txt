@@ -5,3 +5,4 @@ cvxpy
 pybind11
 riskfolio-lib
 optuna
+numba

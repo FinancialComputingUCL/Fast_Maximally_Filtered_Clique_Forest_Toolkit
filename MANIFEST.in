@@ -1,0 +1,4 @@
+include README.md CHANGELOG.md LICENSE requirements.txt
+include src/test_*.py
+recursive-include src/test_data *.json
+recursive-include benchmarks *.py *.json *.md

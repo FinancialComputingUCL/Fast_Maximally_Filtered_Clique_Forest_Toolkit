@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mfcf-toolkit"
+version = "2026.10.0"
+description = "Maximally Filtered Clique Forests: sparse decomposable graphical models, LoGo precision estimation and DBHT clustering"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.22", "scipy>=1.9"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+
+[project.optional-dependencies]
+sklearn = ["scikit-learn>=1.2"]
+cv = ["scikit-learn>=1.2", "optuna>=3"]
+dbht = ["riskfolio-lib"]
+fast = ["numba>=0.57"]
+test = ["pytest", "pytest-timeout", "networkx", "pandas", "scikit-learn>=1.2", "optuna>=3", "numba>=0.57"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["fast_fast_mfcf", "mfcf_logo", "mfcf_dbht", "mutual_information"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["src"]
+filterwarnings = [
+    "ignore:The default gain_function_type changed:FutureWarning",
+]

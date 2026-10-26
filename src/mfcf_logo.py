@@ -1,16 +1,40 @@
 import warnings
 from dataclasses import dataclass
-from typing import Iterable, List, Optional, Union, Dict, Any, Set
+from typing import Iterable, List, Optional, Union, Dict, Any
 
 import numpy as np
 import numpy.linalg as LA
-import optuna
 from sklearn.covariance import EmpiricalCovariance
 from sklearn.covariance import empirical_covariance, log_likelihood
 from sklearn.model_selection import KFold, cross_val_score
-from sklearn.utils.validation import check_array, check_is_fitted, _is_arraylike
+from sklearn.utils.validation import check_array, check_is_fitted
 
 from fast_fast_mfcf import MFCF as _MFCFBuilder
+
+
+def _check_configuration(est, n_samples: int, max_clique_size: int) -> None:
+    """Fail early on configuration errors, which cross-validation would
+    otherwise report as failed folds."""
+    if est.similarity not in ("correlation", "mutual_information"):
+        raise ValueError("similarity must be 'correlation' or 'mutual_information'")
+    if est.correlation not in ("pearson", "spearman", "kendall"):
+        raise ValueError("correlation must be 'pearson', 'spearman' or 'kendall'")
+    ne = est.n_effective
+    if not (ne is None or (isinstance(ne, str) and ne == "auto")):
+        if isinstance(ne, str) or not 3 <= float(ne) <= n_samples:
+            raise ValueError("n_effective must be None, 'auto' or a number between 3 and n_samples")
+    n_starts = est.n_starts if est.n_starts is None else min(est.n_starts, max_clique_size)
+    _MFCFBuilder(threshold=est.threshold, min_clique_size=est.min_clique_size,
+                 max_clique_size=max_clique_size, coordination_number=est.coordination_number,
+                 gain_function_type=est.gain_function_type, acceptance=est.acceptance,
+                 alpha=est.alpha, new_component=est.new_component, n_starts=n_starts)
+
+
+def _fold_n_effective(n_effective, n_train: int, n_total: int):
+    """A numeric n_effective refers to the full sample: scale it to a fold."""
+    if n_effective is None or isinstance(n_effective, str):
+        return n_effective
+    return max(3.0, float(n_effective) * n_train / n_total)
 
 
 class MFCFLoGo(EmpiricalCovariance):
@@ -34,10 +58,48 @@ class MFCFLoGo(EmpiricalCovariance):
     coordination_number : float, default=np.inf
         Maximum allowed uses of a separator (multiplicity cap).
 
-    gain_function_type : {'sumsquares'}, default='sumsquares'
+    gain_function_type : {'loglik', 'sumsquares', 'sum'}, default=None
+        None means 'loglik' (with a FutureWarning in this release: the default
+        was 'sumsquares' until version 2026.10).
         Gain function type to use in MFCF construction. The function is used to
         determine which vertex to add next to maximize the overall gain in the
         graph.
+
+    acceptance : {'threshold', 'ftest', 'bic'}, default='threshold'
+        Rule for accepting each attachment step. 'ftest' (partial F-test at
+        level `alpha`) and 'bic' are statistical validations for the 'loglik'
+        gain; the number of observations is taken from the data.
+
+    alpha : float, default=0.05
+        Level of the partial F-test (acceptance='ftest').
+
+    new_component : {'strongest', 'first'}, default='strongest'
+        Vertex that starts a new component (see `MFCF`).
+
+    n_starts : int or None, default=None
+        Number of starting cliques, at most `max_clique_size`; the clique
+        forest with the largest objective is kept. None: `max_clique_size`
+        for the 'loglik' gain, 1 otherwise (see `MFCF`).
+
+    shrinkage : float, default=0.0
+        Identity shrinkage of the correlation blocks of the LoGo assembly.
+
+    n_effective : None, float or 'auto', default=None
+        Number of observations for the statistical acceptance rules; 'auto'
+        corrects for autocorrelation of time series (see `MFCF.fit`).
+
+    correlation : {'pearson', 'spearman', 'kendall'}, default='pearson'
+        Correlation used for the structure and the precision; the rank options
+        estimate the Gaussian-copula correlation (see `MFCF.fit`).
+
+    similarity : {'correlation', 'mutual_information'}, default='correlation'
+        Dependence measure for the structure. 'mutual_information' uses the
+        pairwise mutual information (Linfoot normalisation) and requires the
+        'sumsquares' or 'sum' gain; the precision is assembled from the
+        correlation blocks (see `MFCF.fit`).
+
+    mi_estimator, mi_n_neighbors, mi_n_bins, mi_normalize, mi_n_jobs, mi_random_state
+        Options of the mutual-information estimator ('ksg' or 'histogram').
 
     assume_centered : bool, default=False
         If True, data are not centered before computation.
@@ -73,7 +135,21 @@ class MFCFLoGo(EmpiricalCovariance):
         min_clique_size: int = 1,
         max_clique_size: int = 4,
         coordination_number: int = np.inf,
-        gain_function_type: str = "sumsquares",
+        gain_function_type: Optional[str] = None,
+        acceptance: str = "threshold",
+        alpha: float = 0.05,
+        new_component: str = "strongest",
+        n_starts: Optional[int] = None,
+        shrinkage: float = 0.0,
+        n_effective=None,
+        correlation: str = "pearson",
+        similarity: str = "correlation",
+        mi_estimator: str = "ksg",
+        mi_n_neighbors: int = 3,
+        mi_n_bins="auto",
+        mi_normalize: str = "linfoot",
+        mi_n_jobs: Optional[int] = None,
+        mi_random_state: Optional[int] = None,
         assume_centered: bool = False,
     ):
         super().__init__(assume_centered=assume_centered)
@@ -82,8 +158,65 @@ class MFCFLoGo(EmpiricalCovariance):
         self.max_clique_size = max_clique_size
         self.coordination_number = coordination_number
         self.gain_function_type = gain_function_type
+        self.acceptance = acceptance
+        self.alpha = alpha
+        self.new_component = new_component
+        self.n_starts = n_starts
+        self.shrinkage = shrinkage
+        self.n_effective = n_effective
+        self.correlation = correlation
+        self.similarity = similarity
+        self.mi_estimator = mi_estimator
+        self.mi_n_neighbors = mi_n_neighbors
+        self.mi_n_bins = mi_n_bins
+        self.mi_normalize = mi_normalize
+        self.mi_n_jobs = mi_n_jobs
+        self.mi_random_state = mi_random_state
 
-    def fit(self, X: np.ndarray, y=None) -> "MFCFLoGo":
+    def _fit_precomputed(self, builder, X, corr_matrix, mi_matrix, cov_matrix):
+        """Interface of the `mutual_info` branch: run on precomputed matrices."""
+        from sklearn.covariance import empirical_covariance
+        p = X.shape[1]
+        for name, M in (("corr_matrix", corr_matrix), ("mi_matrix", mi_matrix), ("cov_matrix", cov_matrix)):
+            if M is not None and np.shape(M) != (p, p):
+                raise ValueError(f"{name} must have shape ({p}, {p}), matching X")
+        if self.similarity == "correlation" and mi_matrix is not None:
+            raise ValueError("mi_matrix is used only with similarity='mutual_information'")
+        if self.similarity == "mutual_information" and corr_matrix is not None:
+            raise ValueError("corr_matrix is used only with similarity='correlation'")
+        if self.similarity == "mutual_information" and builder._gain_unset:
+            builder._gf_type, builder._gain_unset = "sumsquares", False
+            if builder._n_starts_auto:
+                builder._n_starts = 1
+        if self.similarity == "mutual_information" and builder._gf_type == "loglik":
+            raise ValueError("similarity='mutual_information' needs gain_function_type='sumsquares' "
+                             "or 'sum' (the information matrix is not a covariance)")
+        if self.similarity == "correlation":
+            C = corr_matrix if corr_matrix is not None else np.corrcoef(X, rowvar=False)
+            cov = cov_matrix if cov_matrix is not None else C
+        elif self.similarity == "mutual_information":
+            if mi_matrix is not None:
+                C = mi_matrix
+            else:
+                from mutual_information import mutual_information_matrix
+                C = mutual_information_matrix(
+                    X, estimator=self.mi_estimator, n_neighbors=self.mi_n_neighbors,
+                    n_bins=self.mi_n_bins, normalize=self.mi_normalize,
+                    n_jobs=self.mi_n_jobs, random_state=self.mi_random_state)
+            cov = (cov_matrix if cov_matrix is not None
+                   else empirical_covariance(X, assume_centered=self.assume_centered))
+        else:
+            raise ValueError("similarity must be 'correlation' or 'mutual_information'")
+        if builder._n_samples is None:
+            builder._n_samples = float(X.shape[0])     # for the statistical rules
+        cliques, seps, peo, J = builder.run(C=C, cov_matrix=cov)
+        self.cliques_, self.separators_count_, self.peo_ = cliques, seps, peo
+        self.n_effective_ = float(X.shape[0])
+        self.precision_ = J
+
+    def fit(self, X: np.ndarray, y=None, corr_matrix: Optional[np.ndarray] = None,
+            mi_matrix: Optional[np.ndarray] = None,
+            cov_matrix: Optional[np.ndarray] = None) -> "MFCFLoGo":
         """Fit the estimator from data X.
 
         Parameters
@@ -93,6 +226,17 @@ class MFCFLoGo(EmpiricalCovariance):
 
         y : Ignored
             Not used, present for API consistency by convention.
+
+        corr_matrix, mi_matrix, cov_matrix : np.ndarray, optional
+            Precomputed matrices (interface of the `mutual_info` branch):
+            the similarity for the structure (`corr_matrix` with
+            similarity='correlation', `mi_matrix` with
+            similarity='mutual_information') and the matrix whose blocks are
+            assembled into the precision (`cov_matrix`). With `corr_matrix` or
+            `cov_matrix` the precision is on the scale of that matrix (by
+            default the correlation, or the empirical covariance for mutual
+            information) and the options `shrinkage`, `n_effective` and
+            `correlation` are not used.
 
         Returns
         -------
@@ -113,27 +257,40 @@ class MFCFLoGo(EmpiricalCovariance):
             else X.mean(axis=0)
         )
 
-        C = np.corrcoef(X, rowvar=False)
-
-        # run MFCF algorithm over a similarity/affinity matrix.
         builder = _MFCFBuilder(
             threshold=self.threshold,
             min_clique_size=self.min_clique_size,
             max_clique_size=self.max_clique_size,
             coordination_number=self.coordination_number,
             gain_function_type=self.gain_function_type,
+            acceptance=self.acceptance,
+            alpha=self.alpha,
+            new_component=self.new_component,
+            n_starts=self.n_starts,
         )
-
-        cliques, separators_count, peo, logo = builder.run(C=C)
-
-        # store internals
-        self.cliques_ = cliques
-        self.separators_count_ = separators_count
-        self.peo_ = peo
-
-        # precision is LoGo; covariance is inverse of LoGo
-        # Add small ridge if needed to avoid singularities.
-        self.precision_ = logo
+        if mi_matrix is not None and self.similarity != "mutual_information":
+            raise ValueError("mi_matrix is used only with similarity='mutual_information'")
+        if corr_matrix is not None or cov_matrix is not None:
+            self._fit_precomputed(builder, X, corr_matrix, mi_matrix, cov_matrix)
+        else:
+            # structure from the chosen similarity; precision on the covariance
+            # scale of X (LoGo of the correlation blocks rescaled by the variances)
+            builder.fit(X, assume_centered=self.assume_centered,
+                        shrinkage=self.shrinkage, n_effective=self.n_effective,
+                        correlation=self.correlation, similarity=self.similarity,
+                        mi_estimator=self.mi_estimator, mi_n_neighbors=self.mi_n_neighbors,
+                        mi_n_bins=self.mi_n_bins, mi_normalize=self.mi_normalize,
+                        mi_n_jobs=self.mi_n_jobs, mi_random_state=self.mi_random_state,
+                        mi_matrix=mi_matrix)
+            self.cliques_ = [frozenset(int(v) for v in q) for q in builder.cliques_]
+            self.separators_count_ = builder.separators_
+            self.peo_ = builder.peo_
+            self.n_effective_ = builder.n_effective_
+            self.precision_ = builder.precision_
+        if self.precision_ is None:
+            raise ValueError("No precision estimate: some clique blocks are singular (e.g. fewer "
+                             "observations than the clique size); set shrinkage > 0 or lower "
+                             "max_clique_size")
         if self.store_precision and not np.all(np.isfinite(self.precision_)):
             raise ValueError("Computed precision_ contains non-finite values.")
 
@@ -216,10 +373,28 @@ class MFCFLoGoCV(EmpiricalCovariance):
     coordination_number : float, default=np.inf
         Maximum allowed uses of a separator (multiplicity cap).
 
-    gain_function_type : {'sumsquares'}, default='sumsquares'
+    gain_function_type : {'loglik', 'sumsquares', 'sum'}, default=None
+        None means 'loglik' (with a FutureWarning in this release: the default
+        was 'sumsquares' until version 2026.10).
         Gain function type to use in MFCF construction. The function is used to
         determine which vertext to add next to maximize the overall gain in the
         graph.
+
+    acceptance : {'threshold', 'ftest', 'bic'}, default='threshold'
+        Rule for accepting each attachment step. 'ftest' (partial F-test at
+        level `alpha`) and 'bic' are statistical validations for the 'loglik'
+        gain; the number of observations is taken from the data.
+
+    alpha : float, default=0.05
+        Level of the partial F-test (acceptance='ftest').
+
+    new_component : {'strongest', 'first'}, default='strongest'
+        Vertex that starts a new component (see `MFCF`).
+
+    n_starts : int or None, default=None
+        Number of starting cliques, at most `max_clique_size`; the clique
+        forest with the largest objective is kept. None: `max_clique_size`
+        for the 'loglik' gain, 1 otherwise (see `MFCF`).
 
     assume_centered : bool, default=False
         If True, data are not centered before computation.
@@ -286,7 +461,21 @@ class MFCFLoGoCV(EmpiricalCovariance):
         threshold: float = 0.0,
         min_clique_size: int = 1,
         coordination_number: int = np.inf,
-        gain_function_type: str = "sumsquares",
+        gain_function_type: Optional[str] = None,
+        acceptance: str = "threshold",
+        alpha: float = 0.05,
+        new_component: str = "strongest",
+        n_starts: Optional[int] = None,
+        shrinkage: float = 0.0,
+        n_effective=None,
+        correlation: str = "pearson",
+        similarity: str = "correlation",
+        mi_estimator: str = "ksg",
+        mi_n_neighbors: int = 3,
+        mi_n_bins="auto",
+        mi_normalize: str = "linfoot",
+        mi_n_jobs: Optional[int] = None,
+        mi_random_state: Optional[int] = None,
         assume_centered: bool = False,
         # scoring / robustness
         error_score: Union[str, float] = np.nan,
@@ -301,16 +490,33 @@ class MFCFLoGoCV(EmpiricalCovariance):
         self.min_clique_size = min_clique_size
         self.coordination_number = coordination_number
         self.gain_function_type = gain_function_type
+        self.acceptance = acceptance
+        self.alpha = alpha
+        self.new_component = new_component
+        self.n_starts = n_starts
+        self.shrinkage = shrinkage
+        self.n_effective = n_effective
+        self.correlation = correlation
+        self.similarity = similarity
+        self.mi_estimator = mi_estimator
+        self.mi_n_neighbors = mi_n_neighbors
+        self.mi_n_bins = mi_n_bins
+        self.mi_normalize = mi_normalize
+        self.mi_n_jobs = mi_n_jobs
+        self.mi_random_state = mi_random_state
         self.assume_centered = assume_centered
 
         self.error_score = error_score
 
     # ------------------------------ utils ------------------------------
     def _iter_grid(self, n_features: int) -> List[int]:
-        if _is_arraylike(self.max_clique_size_grid):
-            grid = list({int(k) for k in self.max_clique_size_grid})
+        if not isinstance(self.max_clique_size_grid, (int, np.integer)):
+            vals = list(self.max_clique_size_grid)
+            if any(isinstance(k, bool) or float(k) != int(k) for k in vals):
+                raise ValueError("max_clique_size_grid must contain integers")
+            grid = sorted({int(k) for k in vals})
         else:
-            lower = max(2, int(self.min_clique_size))
+            lower = min(max(2, int(self.min_clique_size)), max(1, int(n_features)))
             upper = min(self.max_clique_size_grid, int(n_features))
             grid = list(range(lower, upper + 1))
         # filter feasibility
@@ -359,9 +565,9 @@ class MFCFLoGoCV(EmpiricalCovariance):
         grid = self._iter_grid(n_features)
 
         # CV splitter
-        kf = KFold(
-            n_splits=self.cv, shuffle=self.shuffle, random_state=self.random_state
-        )
+        _check_configuration(self, X.shape[0], max(grid))
+        kf = KFold(n_splits=self.cv, shuffle=self.shuffle,
+                   random_state=self.random_state if self.shuffle else None)
 
         split_scores_per_param: List[List[float]] = [[] for _ in grid]
         fold_records: List[_FoldScore] = []
@@ -378,6 +584,20 @@ class MFCFLoGoCV(EmpiricalCovariance):
                         max_clique_size=k,
                         coordination_number=self.coordination_number,
                         gain_function_type=self.gain_function_type,
+                        acceptance=self.acceptance,
+                        alpha=self.alpha,
+                        new_component=self.new_component,
+                        n_starts=None if self.n_starts is None else min(self.n_starts, k),
+                        shrinkage=self.shrinkage,
+                        n_effective=_fold_n_effective(self.n_effective, len(tr), X.shape[0]),
+                        correlation=self.correlation,
+                        similarity=self.similarity,
+                        mi_estimator=self.mi_estimator,
+                        mi_n_neighbors=self.mi_n_neighbors,
+                        mi_n_bins=self.mi_n_bins,
+                        mi_normalize=self.mi_normalize,
+                        mi_n_jobs=self.mi_n_jobs,
+                        mi_random_state=self.mi_random_state,
                         assume_centered=self.assume_centered,
                     )
                     base.fit(X_tr)
@@ -416,8 +636,15 @@ class MFCFLoGoCV(EmpiricalCovariance):
             dtype=float,
         )
 
-        # pick the best k (tie-breaker: larger k if equal mean? choose argmax, then prefer smaller std)
-        best_idx = int(np.argmax(means))
+        # pick the best k among the grid values whose folds all succeeded
+        # (a finite error_score must not make a failed value look best)
+        ok = np.array([all(r.success for r in fold_records if r.max_clique_size == k) for k in grid])
+        ok &= np.isfinite(means)
+        if not ok.any():
+            raise ValueError("Every max_clique_size in the grid failed in cross-validation "
+                             "(e.g. fewer training observations than the clique size); "
+                             "use shrinkage > 0 or smaller clique sizes")
+        best_idx = int(np.argmax(np.where(ok, means, -np.inf)))
         best_k = int(grid[best_idx])
 
         # Store CV artifacts
@@ -438,6 +665,20 @@ class MFCFLoGoCV(EmpiricalCovariance):
             max_clique_size=best_k,
             coordination_number=self.coordination_number,
             gain_function_type=self.gain_function_type,
+            acceptance=self.acceptance,
+            alpha=self.alpha,
+            new_component=self.new_component,
+            n_starts=None if self.n_starts is None else min(self.n_starts, best_k),
+            shrinkage=self.shrinkage,
+            n_effective=self.n_effective,
+            correlation=self.correlation,
+            similarity=self.similarity,
+            mi_estimator=self.mi_estimator,
+            mi_n_neighbors=self.mi_n_neighbors,
+            mi_n_bins=self.mi_n_bins,
+            mi_normalize=self.mi_normalize,
+            mi_n_jobs=self.mi_n_jobs,
+            mi_random_state=self.mi_random_state,
             assume_centered=self.assume_centered,
         )
         final.fit(X)
@@ -500,7 +741,8 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         Whether to shuffle samples before splitting.
 
     random_state : Optional[int], default=None
-        Random state for the KFold when shuffle=True.
+        Random state for the KFold when shuffle=True and seed of the Optuna
+        sampler (reproducible search).
 
     # Scoring / stability
     assume_centered : bool, default=False
@@ -521,10 +763,28 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
     coordination_number : float, default=np.inf
         Maximum allowed uses of a separator (multiplicity cap).
 
-    gain_function_type : {'sumsquares'}, default='sumsquares'
+    gain_function_type : {'loglik', 'sumsquares', 'sum'}, default=None
+        None means 'loglik' (with a FutureWarning in this release: the default
+        was 'sumsquares' until version 2026.10).
         Gain function type to use in MFCF construction. The function is used to
         determine which vertext to add next to maximize the overall gain in the
         graph.
+
+    acceptance : {'threshold', 'ftest', 'bic'}, default='threshold'
+        Rule for accepting each attachment step. 'ftest' (partial F-test at
+        level `alpha`) and 'bic' are statistical validations for the 'loglik'
+        gain; the number of observations is taken from the data.
+
+    alpha : float, default=0.05
+        Level of the partial F-test (acceptance='ftest').
+
+    new_component : {'strongest', 'first'}, default='strongest'
+        Vertex that starts a new component (see `MFCF`).
+
+    n_starts : int or None, default=None
+        Number of starting cliques, at most `max_clique_size`; the clique
+        forest with the largest objective is kept. None: `max_clique_size`
+        for the 'loglik' gain, 1 otherwise (see `MFCF`).
 
     assume_centered : bool, default=False
         If True, data are not centered before computation.
@@ -535,6 +795,13 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
 
     Attributes
     ----------
+    best_params_ : dict
+        Tuned values of `tunable_params` (empty without tuning).
+
+    cv_results_ : dict
+        One entry per Optuna trial: ``params``, ``mean_test_score`` (NaN for a
+        failed trial) and ``state``.
+
     covariance_ : ndarray of shape (n_features, n_features)
         Inverse of the LoGo precision estimate.
 
@@ -595,7 +862,21 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         min_clique_size: int = 1,
         max_clique_size: int = 4,
         coordination_number: int = np.inf,
-        gain_function_type: str = "sumsquares",
+        gain_function_type: Optional[str] = None,
+        acceptance: str = "threshold",
+        alpha: float = 0.05,
+        new_component: str = "strongest",
+        n_starts: Optional[int] = None,
+        shrinkage: float = 0.0,
+        n_effective=None,
+        correlation: str = "pearson",
+        similarity: str = "correlation",
+        mi_estimator: str = "ksg",
+        mi_n_neighbors: int = 3,
+        mi_n_bins="auto",
+        mi_normalize: str = "linfoot",
+        mi_n_jobs: Optional[int] = None,
+        mi_random_state: Optional[int] = None,
         assume_centered: bool = False,
         # scoring / robustness
         error_score: Union[str, float] = np.nan,
@@ -613,19 +894,56 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         self.min_clique_size = min_clique_size
         self.coordination_number = coordination_number
         self.gain_function_type = gain_function_type
+        self.acceptance = acceptance
+        self.alpha = alpha
+        self.new_component = new_component
+        self.n_starts = n_starts
+        self.shrinkage = shrinkage
+        self.n_effective = n_effective
+        self.correlation = correlation
+        self.similarity = similarity
+        self.mi_estimator = mi_estimator
+        self.mi_n_neighbors = mi_n_neighbors
+        self.mi_n_bins = mi_n_bins
+        self.mi_normalize = mi_normalize
+        self.mi_n_jobs = mi_n_jobs
+        self.mi_random_state = mi_random_state
         self.assume_centered = assume_centered
 
         self.error_score = error_score
 
-    def _process_params(self, trial: optuna.Trial, n_features: int) -> Dict[str, Any]:
+    def _process_params(self, trial, n_features: int) -> Dict[str, Any]:
         params = dict(
             threshold=self.threshold,
             min_clique_size=self.min_clique_size,
             max_clique_size=self.max_clique_size,
             coordination_number=self.coordination_number,
+            gain_function_type=self.gain_function_type,
+            acceptance=self.acceptance,
+            alpha=self.alpha,
+            new_component=self.new_component,
+            n_starts=self.n_starts,
+            shrinkage=self.shrinkage,
+            n_effective=self.n_effective,
+            correlation=self.correlation,
+            similarity=self.similarity,
+            mi_estimator=self.mi_estimator,
+            mi_n_neighbors=self.mi_n_neighbors,
+            mi_n_bins=self.mi_n_bins,
+            mi_normalize=self.mi_normalize,
+            mi_n_jobs=self.mi_n_jobs,
+            mi_random_state=self.mi_random_state,
         )
         if not self.tunable_params:
             return params
+        unknown = set(self.tunable_params) - {"alpha", "threshold", "max_clique_size",
+                                               "min_clique_size", "coordination_number"}
+        if unknown:
+            raise ValueError(f"Unknown tunable_params: {sorted(unknown)}; choose from 'alpha', "
+                             "'threshold', 'max_clique_size', 'min_clique_size', 'coordination_number'")
+
+        if "alpha" in self.tunable_params:
+            params["alpha"] = trial.suggest_float("alpha", 1e-4, 0.5, log=True)
 
         if "threshold" in self.tunable_params:
             params["threshold"] = trial.suggest_float("threshold", 0.0, 1.0, step=None)
@@ -635,7 +953,7 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             and "min_clique_size" in self.tunable_params
         ):
             params["max_clique_size"] = trial.suggest_int(
-                "max_clique_size", 2, min(32, n_features - 1), log=True
+                "max_clique_size", 2, max(2, min(32, n_features)), log=True
             )
             params["min_clique_size"] = trial.suggest_int(
                 "min_clique_size", 1, params["max_clique_size"], log=True
@@ -647,8 +965,9 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             )
         elif "max_clique_size" in self.tunable_params:
             # Only tune max_clique_size, fixed min_clique_size
+            lo = min(max(2, int(self.min_clique_size)), max(2, n_features))
             params["max_clique_size"] = trial.suggest_int(
-                "max_clique_size", 2, min(32, n_features - 1), log=True
+                "max_clique_size", lo, max(lo, min(32, n_features)), log=True
             )
 
         if "coordination_number" in self.tunable_params:
@@ -659,7 +978,12 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
         return params
 
     def _cross_validate(self, X: np.ndarray):
-        def objective(trial: optuna.Trial):
+        try:
+            import optuna
+        except ImportError as e:
+            raise ImportError("MFCFLoGoCVAll requires optuna: pip install optuna") from e
+
+        def objective(trial):
             n_features = X.shape[1]
             params = self._process_params(trial, n_features)
             # Log sampled parameters before evaluating the trial
@@ -668,25 +992,66 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             #     + ", ".join(f"{k}={v}" for k, v in params.items()),
             #     flush=True,
             # )
+            if params["n_starts"] is not None:
+                params["n_starts"] = min(params["n_starts"], params["max_clique_size"])
+            n = X.shape[0]
+            params["n_effective"] = _fold_n_effective(params["n_effective"], n - -(-n // self.cv), n)
             est = MFCFLoGo(**params, assume_centered=self.assume_centered)
 
-            cv = KFold(n_splits=5, shuffle=self.shuffle, random_state=self.random_state)
-            scores = cross_val_score(
-                est, X, y=None, scoring=log_likelihood_scorer, cv=cv, n_jobs=self.n_jobs
-            )
-            return scores.mean()
+            cv = KFold(n_splits=self.cv, shuffle=self.shuffle,
+                       random_state=self.random_state if self.shuffle else None)
+            try:
+                scores = cross_val_score(
+                    est, X, y=None, scoring=log_likelihood_scorer, cv=cv, n_jobs=self.n_jobs,
+                    error_score="raise" if self.error_score == "raise" else np.nan,
+                )
+            except Exception:
+                if self.error_score == "raise":
+                    raise
+                return float("nan")          # failed trial: never selected
+            # a configuration with any failed fold is not eligible
+            return float(scores.mean()) if np.all(np.isfinite(scores)) else float("nan")
 
-        study = optuna.create_study(direction="maximize")
-        study.optimize(objective, n_trials=self.n_trials)
-
-        best_params = study.best_params
+        self._trials = []
+        if not self.n_trials or not self.tunable_params:      # no tuning: fixed parameters
+            best_params = {}
+        else:
+            sampler = optuna.samplers.TPESampler(seed=self.random_state)  # reproducible search
+            study = optuna.create_study(direction="maximize", sampler=sampler)
+            study.optimize(objective, n_trials=int(self.n_trials))
+            complete = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+            if not complete:
+                raise ValueError("Every trial failed in cross-validation (e.g. clique sizes larger "
+                                 "than the training folds support); use shrinkage > 0, fewer "
+                                 "tunable clique sizes or more observations")
+            best_params = study.best_params
+            self._trials = [dict(params=dict(t.params),
+                                 mean_test_score=(float(t.value) if t.value is not None else np.nan),
+                                 state=t.state.name) for t in study.trials]
         final_params = dict(
             threshold=self.threshold,
             min_clique_size=self.min_clique_size,
             max_clique_size=self.max_clique_size,
             coordination_number=self.coordination_number,
+            gain_function_type=self.gain_function_type,
+            acceptance=self.acceptance,
+            alpha=self.alpha,
+            new_component=self.new_component,
+            n_starts=self.n_starts,
+            shrinkage=self.shrinkage,
+            n_effective=self.n_effective,
+            correlation=self.correlation,
+            similarity=self.similarity,
+            mi_estimator=self.mi_estimator,
+            mi_n_neighbors=self.mi_n_neighbors,
+            mi_n_bins=self.mi_n_bins,
+            mi_normalize=self.mi_normalize,
+            mi_n_jobs=self.mi_n_jobs,
+            mi_random_state=self.mi_random_state,
         )
         final_params.update(best_params)
+        if final_params["n_starts"] is not None:
+            final_params["n_starts"] = min(final_params["n_starts"], final_params["max_clique_size"])
         # print(best_params, flush=True)
 
         return final_params
@@ -724,7 +1089,19 @@ class MFCFLoGoCVAll(EmpiricalCovariance):
             else X.mean(axis=0)
         )
 
+        _check_configuration(self, X.shape[0], self.max_clique_size)
+        unknown = set(self.tunable_params or ()) - {"alpha", "threshold", "max_clique_size",
+                                                    "min_clique_size", "coordination_number"}
+        if unknown:
+            raise ValueError(f"Unknown tunable_params: {sorted(unknown)}")
         best_params = self._cross_validate(X)
+        self.cv_results_ = {                            # one entry per Optuna trial
+            "params": [t["params"] for t in self._trials],
+            "mean_test_score": np.array([t["mean_test_score"] for t in self._trials], dtype=float),
+            "state": [t["state"] for t in self._trials],
+        }
+        self.best_params_ = {k: v for k, v in best_params.items()
+                             if k in (self.tunable_params or ()) and self.n_trials}
 
         # Refit on all data with best parameter
         final = MFCFLoGo(**best_params, assume_centered=self.assume_centered)

@@ -4,19 +4,32 @@ Accelerated Maximally Filtered Clique Forest (MFCF) implementations for sparse p
 
 ## Introduction
 - Build MFCF backbones from dense similarity matrices in a few seconds.
-- Drop-in graphical-model estimators (`MFCFLoGO`, `MFCFLoGOCV`, `MFCFLoGOCVAll`) that follow the scikit-learn API and offer a faster, more accurate alternative to Graphical Lasso when the sample-to-feature ratio is small.
-- Extend Riskfolio-Lib’s Direct Bubble Hierarchical Tree (DBHT) pipeline so it can operate over any MFCF backbone instead of only TMFG graphs (`mfcf_dbht`).
+- Drop-in graphical-model estimators (`MFCFLoGo`, `MFCFLoGoCV`, `MFCFLoGoCVAll`) that follow the scikit-learn API and offer a faster, more accurate alternative to Graphical Lasso when the sample-to-feature ratio is small.
+- Run Riskfolio-Lib’s Direct Bubble Hierarchical Tree (DBHT) clustering on the maximally planar MFCF backbone, the MFCF equivalent of the TMFG (`mfcf_dbht`).
+- Gaussian log-likelihood gain with statistical validation (F-test, BIC), several starts, and decomposable maximum-likelihood precision built directly from data (`MFCF.fit`).
+- Dependence beyond correlation: rank (Spearman, Kendall) and mutual-information (KSG, histogram) similarities (`mutual_information`).
+- One package for all earlier lines of development: the original `fast_fast_mfcf`, the toolkit `main` branch and the `mutual_info` branch (see *Compatibility with earlier versions*).
 
 ## Getting Started
 - Python 3.9+ recommended.
-- Clone the repository and install dependencies:
+- Clone the repository and install the package (numpy and scipy only), with
+  optional extras: `sklearn` for the LoGo estimators, `cv` for
+  `MFCFLoGoCVAll` (adds optuna), `dbht` for `mfcf_dbht` (riskfolio-lib),
+  `test` for the test suite:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -U pip
-pip install -r requirements.txt
+pip install ".[sklearn]"        # or ".[cv,dbht]", ".[test]"
+python -m pytest -q             # from the repository root, with ".[test]"
 ```
+
+  The extra `fast` adds numba, which enables a direct path about twice as
+  fast for network generation (`"sumsquares"` or `"sum"` gain with
+  `threshold=0` and `min_clique_size <= 1`); results are the same without it.
+  `pip install -r requirements.txt` still installs every optional dependency.
+  Version history: [CHANGELOG.md](CHANGELOG.md).
 
 - Optional: enable logging for verbose traces:
 
@@ -49,7 +62,184 @@ cliques, separators, peo, logo = builder.run(C=C, cov_matrix=Cov)
 - `peo`: perfect elimination order collected during growth.
 - `logo`: sparse inverse assembled from clique and separator inverses.
 
-### Precision Estimation (`MFCFLoGO()`)
+#### Two kinds of input
+
+MFCF works either on a **covariance or correlation matrix** (dependency
+networks, precision estimation) or on a **general weight / similarity matrix**
+(network filtering, clustering). The gain and the attachment rule are chosen
+accordingly:
+
+| Input `C` | `gain_function_type` | Gain of attaching `v` to `S` | `acceptance` |
+|---|---|---|---|
+| covariance / correlation (checked) | `"loglik"` (default) | exact `-1/2 log(1 - R^2_{v|S})` | `"threshold"`, `"ftest"`, `"bic"` |
+| covariance / correlation (checked) | `"sumsquares"` | `sum_{u in S} C[v,u]^2`, the original approximation | `"threshold"` |
+| non-negative weight / similarity matrix (checked) | `"sum"` | `sum_{u in S} C[v,u]` | `"threshold"` |
+
+With `"loglik"`, `S` is grown greedily inside a clique (or facet), adding at
+each step the vertex with the largest squared partial correlation with `v`.
+Each step is accepted by:
+
+- `acceptance="threshold"` (default): squared partial correlation `>= threshold`
+  (at the first step, the squared correlation);
+- `acceptance="ftest"`: partial F-test of the added coefficient at level
+  `alpha`, given `n_samples` observations;
+- `acceptance="bic"`: `n_samples * (-log(1 - rho^2)) > log(n_samples)`.
+
+The statistical rules scale with the sample size and with the number of
+variables already in `S`, so they give a data-driven sparsity; each test is
+applied to the best of many candidates without a correction for that
+selection, so on pure noise some edges still pass at the nominal level. The
+mandatory `min_clique_size - 1` picks bypass the rule, but a vertex attaches
+only if its total gain reaches that of one accepted step; otherwise it starts
+a new component (with `min_clique_size >= 3` several mandatory picks can add
+up past that bar).
+
+Because the in-sample likelihood can only grow with `S`, `threshold=0` accepts
+every step: every clique then grows to `max_clique_size` (for data without
+exact ties), and the result is the fixed-size construction. Variable clique sizes come from `threshold > 0` or a
+statistical rule.
+
+With `"sumsquares"` and `"sum"`, `threshold` applies to each `C[v,u]^2` or
+`C[v,u]`, exactly as in earlier versions. `"loglik"` and `"sumsquares"` check
+that `C` is a valid covariance or correlation matrix (signed entries allowed);
+`"sum"` checks that the weights are non-negative. Each raises an error
+otherwise. `run()` assembles the LoGo matrix from `cov_matrix` if given, else
+from `C` itself; for a weight matrix that is rarely meaningful (and it is
+`None` when the blocks of `C` are singular), so pass a covariance as
+`cov_matrix` to obtain a precision.
+
+```python
+import numpy as np
+from fast_fast_mfcf import MFCF
+
+# dependency network with statistically validated attachments
+cliques, seps, peo, J = MFCF(max_clique_size=10, acceptance="ftest",
+                             alpha=0.01, n_samples=X.shape[0]).run(C=np.corrcoef(X, rowvar=False))
+# filtering of a general similarity matrix
+cliques, seps, peo, _ = MFCF(gain_function_type="sum", threshold=0.2,
+                             max_clique_size=4).run(C=W)
+```
+
+#### Building directly from data (`MFCF.fit`)
+
+For likelihood and covariance tasks the builder can take the data matrix
+(observations in rows, e.g. a multivariate time series of returns):
+
+```python
+from fast_fast_mfcf import MFCF
+
+m = MFCF(max_clique_size=10, acceptance="ftest", alpha=0.01).fit(
+    X, shrinkage=0.05, n_effective="auto")
+m.cliques_, m.separators_, m.peo_          # clique forest
+m.precision_, m.covariance_               # on the covariance scale of X
+m.n_effective_                            # observations used by the test
+```
+
+- The structure is built from the sample correlation, so it does not depend
+  on the scales of the variables; `precision_` is the LoGo assembly of the
+  (optionally shrunk) correlation blocks rescaled by the sample standard
+  deviations, i.e. the decomposable maximum-likelihood estimate when
+  `shrinkage=0`.
+- `n_samples` is set from `X`. For autocorrelated series the statistical
+  tests would otherwise be too permissive: `n_effective="auto"` uses
+  Bartlett's correction for sample correlations,
+  `n / mean_{i<j} (1 + phi_i phi_j) / (1 - phi_i phi_j)` with `phi` the lag-1
+  autocorrelations; a number can also be given.
+- `correlation="spearman"` or `"kendall"` replaces the Pearson correlation
+  by the Gaussian-copula correlation estimated from ranks
+  (`2 sin(pi rho_s / 6)` or `sin(pi tau / 2)`, projected onto the positive
+  definite matrices if needed). The structure is then invariant to monotone
+  transformations of the variables and robust to heavy tails and outliers
+  (e.g. daily returns); the statistical tests hold approximately. Spearman
+  costs about the same as Pearson and is the choice for long series; Kendall
+  costs O(p^2 n log n) (a few seconds for p = 50, n = 20000; well under a
+  second with Spearman).
+- Assumptions: approximately stationary series over the sample (use returns,
+  not prices). Data preparation (missing values, windows) is left to the user.
+- `fit(X)` works with the `"loglik"` gain (default) or `"sumsquares"` (the
+  original construction on the correlation matrix); for other weight
+  matrices use `run(C)`.
+- *Experimental:* `similarity="mutual_information"` builds the structure on the pairwise
+  mutual information in Linfoot's normalisation `sqrt(1 - exp(-2 I))`, which
+  captures non-linear and tail dependence (for Gaussian data it estimates
+  `|rho|`). Estimators: `mi_estimator="ksg"` (k-nearest neighbours, default;
+  consistent, but biased under extreme skewness, e.g. `exp(8x)` margins, so
+  rank-transform such data first) or `"histogram"` (equal-frequency bins,
+  much faster and exactly invariant to monotone transformations; the choice
+  for discrete or heavily tied data, where KSG is biased; with at most 12 bins
+  it underestimates strong dependence, e.g. 0.88 for `rho = 0.9`). It requires the
+  `"sumsquares"` or `"sum"` gain; the precision is still assembled from the
+  correlation blocks. The matrix can be precomputed with
+  `mutual_information.mutual_information_matrix(X)` and passed as
+  `mi_matrix`.
+
+The LoGo estimators (`MFCFLoGo`, `MFCFLoGoCV`, `MFCFLoGoCVAll`) are built on
+`fit(X)` and accept the same options (`acceptance`, `alpha`, `new_component`,
+`n_starts`, `shrinkage`, `n_effective`, `correlation`, `similarity` and the
+`mi_*` options); `MFCFLoGoCVAll` can tune `alpha`
+(`tunable_params=("alpha", ...)`) and stores the tuned values in `best_params_`. Their `precision_` and `covariance_` are on
+the covariance scale of the data (earlier versions returned the precision of
+the correlation matrix).
+
+The exact gain measures the conditional information that an attachment adds,
+so it selects sparser and more accurate networks when the dependence structure
+is sparse; on dense data the two covariance-based options perform similarly.
+Gains are cached per separator, and for fixed clique sizes all facets of a
+clique are scored from a single regression, so the exact gain runs at a cost
+comparable to the approximation (faster for fixed clique sizes). To reproduce
+results of earlier versions exactly on a covariance or correlation matrix,
+pass `gain_function_type="sumsquares"` (the former default) and
+`new_component="first"`.
+
+#### Starting new components (`new_component`)
+
+When no vertex can be attached (its gain is below the threshold, or it fails
+the statistical test), it starts a new component of the clique forest. With
+`new_component="strongest"` (default) the vertex with the largest total
+dependence on the remaining vertices is chosen, so the result does not depend
+on the order of the variables. `new_component="first"` takes the vertex with
+the lowest index, as earlier versions did.
+
+#### Several starts (`n_starts`)
+
+The expansion is greedy, so its result depends on where it starts.
+`n_starts=k` (at most `max_clique_size`) runs it from the default seed and
+from `k - 1` further seeds spread over the network (strong vertices weakly
+related to the seeds already chosen), and keeps the clique forest with the
+largest objective: the decomposable Gaussian log-likelihood for `"loglik"`,
+the total (squared) edge weight for `"sum"` (`"sumsquares"`). The chosen start
+is in `start_`. It costs `k` runs. In simulations of chordal, factor and
+sparse models with the `"loglik"` gain, `k = max_clique_size` starts improved
+the test log-likelihood (by 0.1-0.4 per observation on chordal and factor
+models) and the recovery of the true network, with the F-test, BIC or a
+threshold alike, capturing 60-90% of the gain of trying every vertex as a
+start. With `"sumsquares"` and `"sum"` the gain was negligible. The default
+(`n_starts=None`) is therefore `max_clique_size` starts for `"loglik"` and a
+single start for the weight gains. Pass `n_starts=1` for the fastest run.
+
+### Compatibility with earlier versions
+
+This package merges three lines of development; code written for any of them
+keeps working.
+
+| Earlier code | What to use now |
+|---|---|
+| original `fast_fast_mfcf`: `MFCF().fast_mfcf(C, mfcf_control(), "sumsquares")` | still accepted (DeprecationWarning); the control dictionary maps onto the options below, including `drop_sep` and `method="TMFG"` |
+| toolkit `main`: `MFCF(threshold=..., max_clique_size=...).run(C)` | same call; add `gain_function_type="sumsquares", new_component="first"` for the same results (see below for the exceptions) |
+| `mutual_info` branch: `MFCFLoGo(similarity="mutual_information", mi_estimator=...)`, `fit(X, mi_matrix=..., cov_matrix=...)` | same call (pass `gain_function_type="sumsquares"`, the default of that branch) |
+
+Options of the original implementation: `drop_sep=True` uses each separator
+for at most one attachment, and `seed="tmfg"` starts from the four vertices
+with the largest sums of above-mean squared weights, as in the TMFG.
+Through the legacy call, results equal those of the original implementation
+(with its later bug fixes) in 1696 of 1836 tested configurations (92%). All
+the others combine a positive threshold with a coordination cap or
+`drop_sep`: there the original implementation loses facets that can still
+host vertices, which this version fixes. Likewise, the toolkit `main` branch
+is reproduced except with a cap and a threshold, and for exactly tied
+weights.
+
+### Precision Estimation (`MFCFLoGo()`)
 ```python
 import numpy as np
 from mfcf_logo import MFCFLoGo  # the "mfcflogo" estimator
@@ -68,7 +258,7 @@ covariance = est.get_covariance()
 - Fully scikit-learn compatible: works with `Pipeline`, `GridSearchCV`, and scoring utilities.
 - In many low-sample/high-dimensional regimes it runs faster and attains higher accuracy than Graphical Lasso while keeping interpretation straightforward through clique structure.
 
-### Cross-validated Precision (`mfcflogocv()`)
+### Cross-validated Precision (`MFCFLoGoCV()`)
 ```python
 from mfcf_logo import MFCFLoGoCV
 
@@ -86,7 +276,7 @@ best_precision = cv_est.get_precision()
 - Automatically selects `max_clique_size` via K-fold log-likelihood scoring.
 - Keeps full diagnostics in `cv_results_` and per-fold records in `fold_scores_`.
 
-### Automated Hyperparameter Search (`mfcflogocvall()`)
+### Automated Hyperparameter Search (`MFCFLoGoCVAll()`)
 ```python
 from mfcf_logo import MFCFLoGoCVAll
 
@@ -105,20 +295,28 @@ best_params = tuned.estimator_
 - `estimator_` stores the final `MFCFLoGo` instance fitted with the best parameters.
 
 ### Hierarchical Clustering with DBHT (`mfcf_dbht()`)
+
+The backbone is built on a non-negative similarity `S` (checked) with the
+`"sum"` gain (default); for a correlation matrix `R` use, for instance,
+`S = (1 + R) / 2`, which is also a valid input for `"loglik"` and
+`"sumsquares"`. DBHT is defined for maximally planar graphs (the TMFG). The
+MFCF equivalent has 4-cliques joined by triangles, each triangle used at most
+once, and every vertex attached: `max_clique_size=4`, `coordination_number=1`
+(the default) and threshold 0. This is a planar 3-tree (Apollonian network),
+maximally planar with 3p - 6 edges (checked); other backbones raise an error.
+It is a TMFG-type graph, not in general the same graph as riskfolio's TMFG.
+
 ```python
 import numpy as np
-from scipy.spatial.distance import pdist, squareform
-from mfcf_dbht import mfcf_dbhts as mfcf_dbht
+from scipy.cluster.hierarchy import fcluster
+from mfcf_dbht import mfcf_dbhts
 
 X = ...  # samples x features
-D = squareform(pdist(X, metric="euclidean"))
-S = np.exp(-D)  # any similarity aligned with D
+R = np.corrcoef(X, rowvar=False)
+D = np.sqrt(np.clip(2 * (1 - R), 0, None))       # distance between features
+np.fill_diagonal(D, 0.0)
+S = (1 + R) / 2                                  # non-negative similarity, 1 - D**2 / 4
 
-clusters, Rpm, Adjv, Dpm, Mv, Z = mfcf_dbht(
-    D,
-    S,
-    threshold=0.1,
-    min_clique_size=2,
-    max_clique_size=6,
-)
+T8, Rpm, Adjv, Dpm, Mv, Z = mfcf_dbhts(D, S, max_clique_size=4)
+labels = fcluster(Z, t=4, criterion="maxclust")  # e.g. four clusters
 ```
